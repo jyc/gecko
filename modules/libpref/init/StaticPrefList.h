@@ -1360,6 +1360,13 @@ VARCACHE_PREF(
   bool, true
 )
 
+// Is support for CSS Properties and Values enabled?
+VARCACHE_PREF(
+  "layout.css.properties-and-values.enabled",
+  layout_css_properties_and_values_enabled,
+  bool, false
+)
+
 //---------------------------------------------------------------------------
 // JavaScript prefs
 //---------------------------------------------------------------------------
