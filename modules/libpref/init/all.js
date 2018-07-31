@@ -6024,3 +6024,5 @@ pref("dom.sidebar.enabled", true);
 
 // Turn on fission frameloader swapping
 pref("fission.rebuild_frameloaders_on_remoteness_change", true);
+
+pref("layout.css.properties-and-values.enabled", false);
