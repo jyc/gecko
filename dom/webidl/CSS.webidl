@@ -23,3 +23,12 @@ namespace CSS {
 partial namespace CSS {
   DOMString escape(DOMString ident);
 };
+
+// https://drafts.css-houdini.org/css-properties-values-api/#registering-custom-properties
+partial namespace CSS {
+  [Throws,Pref="layout.css.properties-and-values.enabled"]
+  void registerProperty(PropertyDescriptorDict descriptor);
+
+  [Throws,Pref="layout.css.properties-and-values.enabled"]
+  void unregisterProperty(DOMString name);
+};

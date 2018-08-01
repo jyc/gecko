@@ -40,5 +40,21 @@ void CSS::Escape(const GlobalObject& aGlobal, const nsAString& aIdent,
   nsStyleUtil::AppendEscapedCSSIdent(aIdent, aReturn);
 }
 
+/* static */ void
+CSS::RegisterProperty(const GlobalObject& aGlobal,
+                      const mozilla::dom::PropertyDescriptorDict& aDescriptor,
+                      mozilla::ErrorResult& aRv)
+{
+  // STUB: populated by a later patch in this series
+}
+
+/* static */ void
+CSS::UnregisterProperty(const GlobalObject& aGlobal,
+                        const nsAString& aName,
+                        mozilla::ErrorResult& aRv)
+{
+  // STUB: populated by a later patch in this series
+}
+
 }  // namespace dom
 }  // namespace mozilla

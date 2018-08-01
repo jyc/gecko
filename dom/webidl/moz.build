@@ -739,6 +739,7 @@ WEBIDL_FILES = [
     'ProcessingInstruction.webidl',
     'ProfileTimelineMarker.webidl',
     'Promise.webidl',
+    'PropertyDescriptorDict.webidl',
     'PushEvent.webidl',
     'PushManager.webidl',
     'PushManager.webidl',
