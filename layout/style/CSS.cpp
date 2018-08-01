@@ -10,6 +10,7 @@
 
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/ServoBindings.h"
+#include "mozilla/dom/CSSBinding.h"
 #include "nsGlobalWindow.h"
 #include "mozilla/dom/Document.h"
 #include "nsIURI.h"
@@ -38,6 +39,21 @@ bool CSS::Supports(const GlobalObject& aGlobal, const nsAString& aCondition,
 void CSS::Escape(const GlobalObject& aGlobal, const nsAString& aIdent,
                  nsAString& aReturn) {
   nsStyleUtil::AppendEscapedCSSIdent(aIdent, aReturn);
+}
+
+/* static */
+void CSS::RegisterProperty(
+    const GlobalObject& aGlobal,
+    const mozilla::dom::PropertyDescriptorDict& aDescriptor,
+    mozilla::ErrorResult& aRv) {
+  // STUB: populated by a later patch in this series
+}
+
+/* static */
+void CSS::UnregisterProperty(const GlobalObject& aGlobal,
+                             const nsAString& aName,
+                             mozilla::ErrorResult& aRv) {
+  // STUB: populated by a later patch in this series
 }
 
 }  // namespace dom

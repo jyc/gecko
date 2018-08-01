@@ -19,6 +19,7 @@ class ErrorResult;
 namespace dom {
 
 class GlobalObject;
+struct PropertyDescriptorDict;
 
 class CSS {
  private:
@@ -33,6 +34,13 @@ class CSS {
 
   static void Escape(const GlobalObject& aGlobal, const nsAString& aIdent,
                      nsAString& aReturn);
+
+  static void RegisterProperty(const GlobalObject& aGlobal,
+                               const PropertyDescriptorDict& aDescriptor,
+                               ErrorResult& aRv);
+
+  static void UnregisterProperty(const GlobalObject& aGlobal,
+                                 const nsAString& aName, ErrorResult& aRv);
 };
 
 }  // namespace dom
