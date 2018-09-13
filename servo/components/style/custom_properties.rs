@@ -8,6 +8,7 @@
 
 use crate::hash::map::Entry;
 use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
+use crate::parser::ParserContext;
 use crate::selector_map::{PrecomputedHashMap, PrecomputedHashSet, PrecomputedHasher};
 use crate::stylesheets::{Origin, PerOrigin};
 use crate::Atom;
@@ -20,7 +21,9 @@ use std::borrow::Cow;
 use std::cmp;
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
+use std::ops::Deref;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
+use stylesheets::UrlExtraData;
 
 /// The environment from which to get `env` function values.
 ///
@@ -31,7 +34,7 @@ pub struct CssEnvironment;
 
 struct EnvironmentVariable {
     name: Atom,
-    value: VariableValue,
+    value: TokenStream,
 }
 
 macro_rules! make_variable {
@@ -47,12 +50,10 @@ macro_rules! make_variable {
                 let (first_token_type, css, last_token_type) =
                     parse_self_contained_declaration_value(&mut input, None).unwrap();
 
-                VariableValue {
+                TokenStream {
                     css: css.into_owned(),
                     first_token_type,
                     last_token_type,
-                    references: Default::default(),
-                    references_environment: false,
                 }
             },
         }
@@ -70,7 +71,7 @@ lazy_static! {
 
 impl CssEnvironment {
     #[inline]
-    fn get(&self, name: &Atom) -> Option<&VariableValue> {
+    fn get(&self, name: &Atom) -> Option<&TokenStream> {
         let var = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name)?;
         Some(&var.value)
     }
@@ -92,33 +93,131 @@ pub fn parse_name(s: &str) -> Result<&str, ()> {
     }
 }
 
+/// Extra data that we need to pass along with a custom property's specified
+/// value in order to compute it, if it ends up being registered as being able
+/// to contain URLs through Properties & Values.
+///
+/// When the specified value comes from a declaration, we keep track of the
+/// associated UrlExtraData. However, specified values can also come from
+/// animations: in that case we are able to carry along a copy of the computed
+/// value so that we can skip computation altogether.
+/// XXX This is added in a later patch in this series.
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
+pub enum ExtraData {
+    /// The specified value comes from a declaration (whence we get the
+    /// UrlExtraData).
+    Specified(UrlExtraData),
+
+    /// There is no extra data because this is actually a computed value.
+    Computed,
+    ///// The specified value comes from an animation or an inherited typed custom
+    ///// property (whence we get the properties_and_values::ComputedValue).
+    //Precomputed(properties_and_values::ComputedValue),
+}
+
+/// A <token-stream> value.
+///
+/// Includes starting and ending tokens so that concatenation can occur as
+/// tokens rather than as strings. For example, if we have `foo: 5` and write
+/// `width: var(--foo) em`, `width` should not be declared to be `5em`, a
+/// dimension token, but rather the integer token `5` followed by the identifier
+/// `em`, which is invalid. We implement this by adding /**/ when necessary (see
+/// VariableValue::push).
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
+pub struct TokenStream {
+    /// The specified text.
+    pub css: String,
+
+    /// The first token in the serialization.
+    pub first_token_type: TokenSerializationType,
+
+    /// The last token in the serialization.
+    pub last_token_type: TokenSerializationType,
+}
+
+impl TokenStream {
+    /// Parses `other.to_css(..)` into a TokenStream value.
+    pub fn from_css<T>(other: T) -> Self
+    where
+        T: ToCss,
+    {
+        let mut css = String::new();
+        {
+            let mut writer = CssWriter::new(&mut css);
+            other.to_css::<String>(&mut writer).unwrap();
+        }
+        let (first, last) = {
+            let mut missing_closing_characters = String::new();
+            let mut input = ParserInput::new(&css);
+            let mut input = Parser::new(&mut input);
+            parse_declaration_value_block(&mut input, None, &mut missing_closing_characters)
+                .unwrap()
+        };
+        TokenStream {
+            css: css,
+            first_token_type: first,
+            last_token_type: last,
+        }
+    }
+}
+
+impl Default for TokenStream {
+    fn default() -> Self {
+        TokenStream {
+            css: String::new(),
+            first_token_type: TokenSerializationType::nothing(),
+            last_token_type: TokenSerializationType::nothing(),
+        }
+    }
+}
+
+impl ToCss for TokenStream {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        dest.write_str(&self.css)
+    }
+}
+
 /// A value for a custom property is just a set of tokens.
 ///
 /// We preserve the original CSS for serialization, and also the variable
 /// references to other custom property names.
 #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
 pub struct VariableValue {
-    css: String,
-
-    first_token_type: TokenSerializationType,
-    last_token_type: TokenSerializationType,
+    /// The token stream that comprises the actual variable value.
+    /// The other fields are either derivative data or metadata.
+    pub token_stream: TokenStream,
 
     /// Whether a variable value has a reference to an environment variable.
     ///
     /// If this is the case, we need to perform variable substitution on the
     /// value.
-    references_environment: bool,
+    pub references_environment: bool,
 
     /// Custom property names in var() functions.
-    references: Box<[Name]>,
+    pub references: Box<[Name]>,
+
+    /// Extra data needed to compute the specified value. See the comment on
+    /// ExtraData.
+    pub extra: ExtraData,
 }
 
-impl ToCss for SpecifiedValue {
+impl ToCss for VariableValue {
     fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
     where
         W: Write,
     {
-        dest.write_str(&self.css)
+        self.token_stream.to_css(dest)
+    }
+}
+
+impl Deref for VariableValue {
+    type Target = TokenStream;
+
+    fn deref(&self) -> &TokenStream {
+        &self.token_stream
     }
 }
 
@@ -132,6 +231,11 @@ impl ToCss for SpecifiedValue {
 ///
 /// The variable values are guaranteed to not have references to other
 /// properties.
+///
+/// Outside of this module, this map will normally be accessed through a
+/// properties_and_values::CustomPropertiesMap, which composes it and stores
+/// computed values for typed custom properties as well.
+/// XXX This is added in a later patch in this series.
 pub type CustomPropertiesMap =
     IndexMap<Name, Arc<VariableValue>, BuildHasherDefault<PrecomputedHasher>>;
 
@@ -145,22 +249,68 @@ pub type ComputedValue = VariableValue;
 /// A struct holding information about the external references to that a custom
 /// property value may have.
 #[derive(Default)]
-struct VarOrEnvReferences {
-    custom_property_references: PrecomputedHashSet<Name>,
+pub struct VarOrEnvReferences {
+    /// The custom properties referenced by this value.
+    pub custom_property_references: PrecomputedHashSet<Name>,
     references_environment: bool,
 }
 
 impl VariableValue {
-    fn empty() -> Self {
+    /// Create a VariableValue from a computed value, represented as a
+    /// TokenStream.
+    pub fn computed(token_stream: TokenStream) -> Self {
         Self {
-            css: String::new(),
-            last_token_type: TokenSerializationType::nothing(),
-            first_token_type: TokenSerializationType::nothing(),
+            token_stream,
             references: Default::default(),
             references_environment: false,
+            extra: ExtraData::Computed,
         }
     }
 
+    /// Parse a custom property value.
+    pub fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Arc<Self>, ParseError<'i>> {
+        let mut references = VarOrEnvReferences::default();
+
+        let (first_token_type, css, last_token_type) =
+            parse_self_contained_declaration_value(input, Some(&mut references))?;
+
+        let custom_property_references = references
+            .custom_property_references
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        Ok(Arc::new(VariableValue {
+            token_stream: TokenStream {
+                css: css.into_owned(),
+                first_token_type,
+                last_token_type,
+            },
+            references: custom_property_references,
+            references_environment: references.references_environment,
+            extra: ExtraData::Specified(context.url_data.clone()),
+        }))
+    }
+
+    /// Returns whether or not this specified value contains any variable
+    /// references.
+    pub fn has_references(&self) -> bool {
+        !self.references.is_empty()
+    }
+
+    /// Returns whether this variable value has already been computed (e.g. if
+    /// it is an inherited or initial value).
+    pub fn is_computed(&self) -> bool {
+        let is_specified = matches!(self.extra, ExtraData::Specified(..));
+        debug_assert!(is_specified || (!self.has_references() && !self.references_environment));
+        !is_specified
+    }
+}
+
+impl TokenStream {
     fn push<'i>(
         &mut self,
         input: &Parser<'i, '_>,
@@ -217,40 +367,17 @@ impl VariableValue {
         )
     }
 
-    fn push_variable<'i>(
+    fn push_token_stream<'i>(
         &mut self,
         input: &Parser<'i, '_>,
-        variable: &ComputedValue,
+        value: &TokenStream,
     ) -> Result<(), ParseError<'i>> {
-        debug_assert!(variable.references.is_empty());
         self.push(
             input,
-            &variable.css,
-            variable.first_token_type,
-            variable.last_token_type,
+            &value.css,
+            value.first_token_type,
+            value.last_token_type,
         )
-    }
-
-    /// Parse a custom property value.
-    pub fn parse<'i, 't>(input: &mut Parser<'i, 't>) -> Result<Arc<Self>, ParseError<'i>> {
-        let mut references = VarOrEnvReferences::default();
-
-        let (first_token_type, css, last_token_type) =
-            parse_self_contained_declaration_value(input, Some(&mut references))?;
-
-        let custom_property_references = references
-            .custom_property_references
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-
-        Ok(Arc::new(VariableValue {
-            css: css.into_owned(),
-            first_token_type,
-            last_token_type,
-            references: custom_property_references,
-            references_environment: references.references_environment,
-        }))
     }
 }
 
@@ -299,7 +426,7 @@ fn parse_declaration_value<'i, 't>(
 
 /// Like parse_declaration_value, but accept `!` and `;` since they are only
 /// invalid at the top level
-fn parse_declaration_value_block<'i, 't>(
+pub fn parse_declaration_value_block<'i, 't>(
     input: &mut Parser<'i, 't>,
     mut references: Option<&mut VarOrEnvReferences>,
     missing_closing_characters: &mut String,
@@ -544,7 +671,7 @@ impl<'a> CustomPropertiesBuilder<'a> {
         let map = self.custom_properties.as_mut().unwrap();
         match *value {
             CustomDeclarationValue::Value(ref unparsed_value) => {
-                let has_references = !unparsed_value.references.is_empty();
+                let has_references = unparsed_value.has_references();
                 self.may_have_cycles |= has_references;
 
                 // If the variable value has no references and it has an
@@ -554,7 +681,7 @@ impl<'a> CustomPropertiesBuilder<'a> {
                     let result =
                         substitute_references_in_value(unparsed_value, &map, &self.environment);
                     match result {
-                        Ok(new_value) => Arc::new(new_value),
+                        Ok(new_value) => Arc::new(VariableValue::computed(new_value)),
                         Err(..) => {
                             map.remove(name);
                             return;
@@ -703,7 +830,7 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
             let value = context.map.get(&name)?;
 
             // Nothing to resolve.
-            if value.references.is_empty() {
+            if !value.has_references() {
                 debug_assert!(
                     !value.references_environment,
                     "Should've been handled earlier"
@@ -740,29 +867,29 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
 
         let mut self_ref = false;
         let mut lowlink = index;
-        for next in value.references.iter() {
-            let next_index = match traverse(next.clone(), context) {
-                Some(index) => index,
-                // There is nothing to do if the next variable has been
-                // fully resolved at this point.
-                None => {
-                    continue;
-                },
-            };
-            let next_info = &context.var_info[next_index];
-            if next_index > index {
-                // The next variable has a larger index than us, so it
-                // must be inserted in the recursive call above. We want
-                // to get its lowlink.
-                lowlink = cmp::min(lowlink, next_info.lowlink);
-            } else if next_index == index {
-                self_ref = true;
-            } else if next_info.name.is_some() {
-                // The next variable has a smaller order index and it is
-                // in the stack, so we are at the same component.
-                lowlink = cmp::min(lowlink, next_index);
-            }
-        }
+        value.references.as_ref().map_or((), |references| {
+            references.iter().for_each(|next| {
+                let next_index = match traverse(next.clone(), context) {
+                    Some(index) => index,
+                    // There is nothing to do if the next variable has been
+                    // fully resolved at this point.
+                    None => return,
+                };
+                let next_info = &context.var_info[next_index];
+                if next_index > index {
+                    // The next variable has a larger index than us, so it
+                    // must be inserted in the recursive call above. We want
+                    // to get its lowlink.
+                    lowlink = cmp::min(lowlink, next_info.lowlink);
+                } else if next_index == index {
+                    self_ref = true;
+                } else if next_info.name.is_some() {
+                    // The next variable has a smaller order index and it is
+                    // in the stack, so we are at the same component.
+                    lowlink = cmp::min(lowlink, next_index);
+                }
+            })
+        });
 
         context.var_info[index].lowlink = lowlink;
         if lowlink != index {
@@ -815,7 +942,9 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
 
         match result {
             Ok(computed_value) => {
-                context.map.insert(name, Arc::new(computed_value));
+                context
+                    .map
+                    .insert(name, Arc::new(VariableValue::computed(computed_value)));
             },
             Err(..) => {
                 context.map.remove(&name);
@@ -847,13 +976,13 @@ fn substitute_references_in_value<'i>(
     value: &'i VariableValue,
     custom_properties: &CustomPropertiesMap,
     environment: &CssEnvironment,
-) -> Result<ComputedValue, ParseError<'i>> {
-    debug_assert!(!value.references.is_empty() || value.references_environment);
+) -> Result<TokenStream, ParseError<'i>> {
+    debug_assert!(value.has_references() || value.references_environment);
 
     let mut input = ParserInput::new(&value.css);
     let mut input = Parser::new(&mut input);
     let mut position = (input.position(), value.first_token_type);
-    let mut computed_value = ComputedValue::empty();
+    let mut computed_value = Default::default();
 
     let last_token_type = substitute_block(
         &mut input,
@@ -880,7 +1009,7 @@ fn substitute_references_in_value<'i>(
 fn substitute_block<'i>(
     input: &mut Parser<'i, '_>,
     position: &mut (SourcePosition, TokenSerializationType),
-    partial_computed_value: &mut ComputedValue,
+    partial_computed_value: &mut TokenStream,
     custom_properties: &CustomPropertiesMap,
     env: &CssEnvironment,
 ) -> Result<TokenSerializationType, ParseError<'i>> {
@@ -932,12 +1061,12 @@ fn substitute_block<'i>(
                     let value = if is_env {
                         env.get(&name)
                     } else {
-                        custom_properties.get(&name).map(|v| &**v)
+                        custom_properties.get(&name).map(|v| &v.token_stream)
                     };
 
                     if let Some(v) = value {
                         last_token_type = v.last_token_type;
-                        partial_computed_value.push_variable(input, v)?;
+                        partial_computed_value.push_token_stream(input, v)?;
                         // Skip over the fallback, as `parse_nested_block` would return `Err`
                         // if we don't consume all of `input`.
                         // FIXME: Add a specialized method to cssparser to do this with less work.
@@ -1003,7 +1132,7 @@ pub fn substitute<'i>(
     computed_values_map: Option<&Arc<CustomPropertiesMap>>,
     env: &CssEnvironment,
 ) -> Result<String, ParseError<'i>> {
-    let mut substituted = ComputedValue::empty();
+    let mut substituted = Default::default();
     let mut input = ParserInput::new(input);
     let mut input = Parser::new(&mut input);
     let mut position = (input.position(), first_token_type);

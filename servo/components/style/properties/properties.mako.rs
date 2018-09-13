@@ -2210,7 +2210,7 @@ impl PropertyDeclaration {
                 let value = match input.try(CSSWideKeyword::parse) {
                     Ok(keyword) => CustomDeclarationValue::CSSWideKeyword(keyword),
                     Err(()) => CustomDeclarationValue::Value(
-                        crate::custom_properties::SpecifiedValue::parse(input)?
+                        crate::custom_properties::SpecifiedValue::parse(context, input)?
                     ),
                 };
                 declarations.push(PropertyDeclaration::Custom(CustomDeclaration {
