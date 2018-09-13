@@ -33,7 +33,7 @@ use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::str::CssStringWriter;
 use cssparser::{parse_one_rule, Parser, ParserInput};
 #[cfg(feature = "gecko")]
-use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
 use servo_arc::Arc;
 use std::fmt;
 #[cfg(feature = "gecko")]
@@ -120,6 +120,14 @@ impl ToShmem for UrlExtraData {
         } else {
             ManuallyDrop::new(UrlExtraData(self.0))
         }
+    }
+}
+
+#[cfg(feature = "gecko")]
+impl MallocSizeOf for UrlExtraData {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // See the comment on the implementation of MallocSizeOf for CssUrl.
+        0
     }
 }
 

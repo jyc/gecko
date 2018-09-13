@@ -2209,7 +2209,7 @@ impl PropertyDeclaration {
                 // This probably affects some test results.
                 let value = match input.try(CSSWideKeyword::parse) {
                     Ok(keyword) => CustomDeclarationValue::CSSWideKeyword(keyword),
-                    Err(()) => match crate::custom_properties::SpecifiedValue::parse(input) {
+                    Err(()) => match crate::custom_properties::SpecifiedValue::parse(context, input) {
                         Ok(value) => CustomDeclarationValue::Value(value),
                         Err(e) => return Err(StyleParseErrorKind::new_invalid(
                             format!("--{}", property_name),

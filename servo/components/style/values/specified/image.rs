@@ -1001,7 +1001,7 @@ impl Parse for ColorStop {
 
 impl Parse for PaintWorklet {
     fn parse<'i, 't>(
-        _context: &ParserContext,
+        context: &ParserContext,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
         input.expect_function_matching("paint")?;
@@ -1010,7 +1010,7 @@ impl Parse for PaintWorklet {
             let arguments = input
                 .try(|input| {
                     input.expect_comma()?;
-                    input.parse_comma_separated(|input| SpecifiedValue::parse(input))
+                    input.parse_comma_separated(|input| SpecifiedValue::parse(context, input))
                 })
                 .unwrap_or(vec![]);
             Ok(PaintWorklet { name, arguments })

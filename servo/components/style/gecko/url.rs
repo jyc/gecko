@@ -117,6 +117,7 @@ impl MallocSizeOf for CssUrl {
 
         // We ignore `extra_data`, because RefPtr is tricky, and there aren't
         // many of them in practise (sharing is common).
+        // See also the implementation of MallocSizeOf for UrlExtraData.
 
         0
     }
