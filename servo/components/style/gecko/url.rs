@@ -342,7 +342,7 @@ where
 ///
 /// The only difference between specified and computed URLs is the
 /// serialization.
-#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq)]
+#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq, ToShmem)]
 pub struct ComputedUrl(pub SpecifiedUrl);
 
 impl ToCss for ComputedUrl {
@@ -378,7 +378,7 @@ impl ComputedUrl {
 }
 
 /// The computed value of a CSS image `url()`.
-#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq)]
+#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq, ToShmem)]
 pub struct ComputedImageUrl(pub SpecifiedImageUrl);
 
 impl ToCss for ComputedImageUrl {

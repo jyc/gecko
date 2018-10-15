@@ -145,6 +145,7 @@ pub mod matching;
 pub mod media_queries;
 pub mod parallel;
 pub mod parser;
+pub mod properties_and_values;
 pub mod rule_cache;
 pub mod rule_collector;
 pub mod rule_tree;

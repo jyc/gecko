@@ -920,7 +920,8 @@ impl CSSWideKeyword {
 }
 
 impl CSSWideKeyword {
-    fn parse(input: &mut Parser) -> Result<Self, ()> {
+    /// Parse an input consisting solely of a CSS-wide keyword.
+    pub fn parse(input: &mut Parser) -> Result<Self, ()> {
         let keyword = {
             let ident = input.expect_ident().map_err(|_| ())?;
             match_ignore_ascii_case! { ident,

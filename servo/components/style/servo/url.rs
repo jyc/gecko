@@ -195,7 +195,7 @@ impl ToComputedValue for SpecifiedUrl {
 pub type SpecifiedImageUrl = CssUrl;
 
 /// The computed value of a CSS `url()`, resolved relative to the stylesheet URL.
-#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize, ToShmem)]
 pub enum ComputedUrl {
     /// The `url()` was invalid or it wasn't specified by the user.
     Invalid(#[ignore_malloc_size_of = "Arc"] Arc<String>),
