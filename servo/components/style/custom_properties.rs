@@ -9,6 +9,7 @@
 use crate::hash::map::Entry;
 use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
 use crate::parser::ParserContext;
+use crate::properties_and_values;
 use crate::selector_map::{PrecomputedHashMap, PrecomputedHashSet, PrecomputedHasher};
 use crate::stylesheets::{Origin, PerOrigin};
 use crate::Atom;
@@ -106,7 +107,6 @@ pub fn parse_name(s: &str) -> Result<&str, ()> {
 /// associated UrlExtraData. However, specified values can also come from
 /// animations: in that case we are able to carry along a copy of the computed
 /// value so that we can skip computation altogether.
-/// XXX This is added in a later patch in this series.
 #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 pub enum ExtraData {
@@ -116,9 +116,10 @@ pub enum ExtraData {
 
     /// There is no extra data because this is actually a computed value.
     Computed,
-    ///// The specified value comes from an animation or an inherited typed custom
-    ///// property (whence we get the properties_and_values::ComputedValue).
-    //Precomputed(properties_and_values::ComputedValue),
+
+    /// The specified value comes from an animation or an inherited typed custom
+    /// property (whence we get the properties_and_values::ComputedValue).
+    Precomputed(properties_and_values::ComputedValue),
 }
 
 /// A <token-stream> value.
@@ -230,6 +231,17 @@ impl Deref for VariableValue {
     }
 }
 
+impl<'a> From<&'a properties_and_values::ComputedValue> for VariableValue {
+    fn from(other: &'a properties_and_values::ComputedValue) -> Self {
+        SpecifiedValue {
+            token_stream: other.to_token_stream(),
+            references: None,
+            references_environment: false,
+            extra: ExtraData::Precomputed(other.clone()),
+        }
+    }
+}
+
 /// A map from CSS variable names to CSS variable computed values, used for
 /// resolving.
 ///
@@ -244,7 +256,6 @@ impl Deref for VariableValue {
 /// Outside of this module, this map will normally be accessed through a
 /// properties_and_values::CustomPropertiesMap, which composes it and stores
 /// computed values for typed custom properties as well.
-/// XXX This is added in a later patch in this series.
 pub type CustomPropertiesMap =
     IndexMap<Name, Arc<VariableValue>, BuildHasherDefault<PrecomputedHasher>>;
 
