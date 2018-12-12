@@ -5822,25 +5822,37 @@ pub unsafe extern "C" fn Servo_GetPropertyValue(
 
 #[no_mangle]
 pub unsafe extern "C" fn Servo_GetCustomPropertyValue(
+    raw_data: &RawServoStyleSet,
     computed_values: &ComputedValues,
     name: *const nsAString,
     value: *mut nsAString,
 ) -> bool {
-    let custom_properties = match computed_values.custom_properties() {
-        Some(p) => p,
-        None => return false,
-    };
-
+    let custom_properties = computed_values.custom_properties();
     let name = Atom::from(&*name);
-    let computed_value = match custom_properties.get(&name) {
-        Some(v) => v,
-        None => return false,
-    };
-
-    computed_value
-        .to_css(&mut CssWriter::new(&mut *value))
-        .unwrap();
-    true
+    match custom_properties.and_then(|ps| ps.get(&name)) {
+        Some(v) => {
+            // Handle the usual case of a custom property declaration in the
+            // map.
+            v.token_stream.to_css(&mut CssWriter::new(&mut *value)).unwrap();
+            true
+        }
+        None => {
+            // Handle the unusual case of a typed custom property with an
+            // initial value and not in the map.
+            let data = PerDocumentStyleData::from_ffi(raw_data).borrow_mut();
+            let locked = data.stylist.registered_property_set();
+            let global_style_data = &*GLOBAL_STYLE_DATA;
+            let mut guard = global_style_data.shared_lock.read();
+            let registered_property_set = locked.read_with(&mut guard);
+            match registered_property_set.get(&name).and_then(|r| r.initial_value.as_ref()) {
+                Some(&(ref _value, ref css)) => {
+                    css.to_css(&mut CssWriter::new(&mut *value)).unwrap();
+                    true
+                },
+                None => false,
+            }
+        },
+    }
 }
 
 #[no_mangle]
