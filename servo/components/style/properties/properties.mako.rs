@@ -1547,6 +1547,13 @@ impl UnparsedValue {
             })
         };
 
+        // XXX This will be replaced by a later patch in this series.
+        let empty_custom_properties = Default::default();
+        let custom_properties =
+            custom_properties
+            .map(|x| &**x)
+            .unwrap_or(&empty_custom_properties);
+
         let css = match crate::custom_properties::substitute(
             &self.css,
             self.first_token_type,
