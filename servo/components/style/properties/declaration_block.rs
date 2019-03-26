@@ -9,11 +9,12 @@
 use crate::context::QuirksMode;
 use cssparser::{DeclarationListParser, parse_important, ParserInput, CowRcStr};
 use cssparser::{Parser, AtRuleParser, DeclarationParser, Delimiter, ParseErrorKind};
-use crate::custom_properties::{CustomPropertiesBuilder, CssEnvironment};
+use crate::custom_properties::CssEnvironment;
 use crate::error_reporting::{ParseErrorReporter, ContextualParseError};
 use itertools::Itertools;
 use crate::parser::ParserContext;
 use crate::properties::animated_properties::{AnimationValue, AnimationValueMap};
+use crate::properties_and_values::{CustomPropertiesMap, CustomPropertiesBuilder};
 use crate::shared_lock::Locked;
 use smallbitvec::{self, SmallBitVec};
 use smallvec::SmallVec;
@@ -146,7 +147,7 @@ pub struct AnimationValueIterator<'a, 'cx, 'cx_a:'cx> {
     context: &'cx mut Context<'cx_a>,
     default_values: &'a ComputedValues,
     /// Custom properties in a keyframe if exists.
-    extra_custom_properties: Option<&'a Arc<crate::custom_properties::CustomPropertiesMap>>,
+    extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
 }
 
 impl<'a, 'cx, 'cx_a:'cx> AnimationValueIterator<'a, 'cx, 'cx_a> {
@@ -154,7 +155,7 @@ impl<'a, 'cx, 'cx_a:'cx> AnimationValueIterator<'a, 'cx, 'cx_a> {
         declarations: &'a PropertyDeclarationBlock,
         context: &'cx mut Context<'cx_a>,
         default_values: &'a ComputedValues,
-        extra_custom_properties: Option<&'a Arc<crate::custom_properties::CustomPropertiesMap>>,
+        extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
     ) -> AnimationValueIterator<'a, 'cx, 'cx_a> {
         AnimationValueIterator {
             iter: declarations.declaration_importance_iter(),
@@ -260,7 +261,7 @@ impl PropertyDeclarationBlock {
         &'a self,
         context: &'cx mut Context<'cx_a>,
         default_values: &'a ComputedValues,
-        extra_custom_properties: Option<&'a Arc<crate::custom_properties::CustomPropertiesMap>>,
+        extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
     ) -> AnimationValueIterator<'a, 'cx, 'cx_a> {
         AnimationValueIterator::new(self, context, default_values, extra_custom_properties)
     }
@@ -780,6 +781,16 @@ impl PropertyDeclarationBlock {
                 &PropertyDeclaration::WithVariables(ref declaration),
                 Some(ref _computed_values),
             ) => {
+                let custom_properties =
+                    custom_properties
+                    .as_ref()
+                    .map(|custom_properties| crate::properties_and_values::PVSubstitutionMap {
+                        // TODO(jyc) This means the initial values of registered
+                        // custom properties won't be substituted. The only
+                        // caller currently is KeyframeEffect::GetKeyframes.
+                        registered_property_set: None,
+                        custom_properties,
+                    });
                 declaration.value.substitute_variables(
                     declaration.id,
                     custom_properties.as_ref(),
@@ -829,7 +840,7 @@ impl PropertyDeclarationBlock {
     pub fn cascade_custom_properties_with_context(
         &self,
         context: &Context,
-    ) -> Option<Arc<crate::custom_properties::CustomPropertiesMap>> {
+    ) -> Option<Arc<CustomPropertiesMap>> {
         self.cascade_custom_properties(
             context.style().custom_properties(),
             context.device().environment(),
@@ -841,10 +852,12 @@ impl PropertyDeclarationBlock {
     /// properties.
     fn cascade_custom_properties(
         &self,
-        inherited_custom_properties: Option<&Arc<crate::custom_properties::CustomPropertiesMap>>,
+        inherited_custom_properties: Option<&Arc<CustomPropertiesMap>>,
         environment: &CssEnvironment,
-    ) -> Option<Arc<crate::custom_properties::CustomPropertiesMap>> {
+    ) -> Option<Arc<CustomPropertiesMap>> {
+        // TODO(jyc) Do we need to care about typed custom properties here?
         let mut builder = CustomPropertiesBuilder::new(
+            /* registered_property_set */ None,
             inherited_custom_properties,
             environment,
         );
@@ -855,7 +868,11 @@ impl PropertyDeclarationBlock {
             }
         }
 
-        builder.build()
+        let (custom_properties, _early_only, _font_size_cyclical) = builder.build_early(
+            /* context */ None,
+            /* font_size_references */ &[]
+        );
+        custom_properties
     }
 
     /// Like the method on ToCss, but without the type parameter to avoid

@@ -15,6 +15,7 @@ use crate::properties::{CSSWideKeyword, PropertyDeclaration};
 use crate::properties::longhands;
 use crate::properties::longhands::visibility::computed_value::T as Visibility;
 use crate::properties::LonghandId;
+use crate::properties_and_values::CustomPropertiesMap;
 use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::ptr;
@@ -379,7 +380,7 @@ impl AnimationValue {
     pub fn from_declaration(
         decl: &PropertyDeclaration,
         context: &mut Context,
-        extra_custom_properties: Option<<&Arc<crate::custom_properties::CustomPropertiesMap>>,
+        extra_custom_properties: Option<<&Arc<CustomPropertiesMap>>,
         initial: &ComputedValues
     ) -> Option<Self> {
         use super::PropertyDeclarationVariantRepr;
@@ -501,11 +502,16 @@ impl AnimationValue {
             PropertyDeclaration::WithVariables(ref declaration) => {
                 let substituted = {
                     let custom_properties =
-                        extra_custom_properties.or_else(|| context.style().custom_properties());
+                        extra_custom_properties
+                        .or_else(|| context.style().custom_properties())
+                        .map(|custom_properties| crate::properties_and_values::PVSubstitutionMap {
+                            registered_property_set: context.registered_property_set,
+                            custom_properties: &**custom_properties,
+                        });
 
                     declaration.value.substitute_variables(
                         declaration.id,
-                        custom_properties,
+                        custom_properties.as_ref(),
                         context.quirks_mode,
                         context.device().environment(),
                     )

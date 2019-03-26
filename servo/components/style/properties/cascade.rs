@@ -5,7 +5,6 @@
 //! The main cascading algorithm of the style system.
 
 use crate::context::QuirksMode;
-use crate::custom_properties::CustomPropertiesBuilder;
 use crate::dom::TElement;
 use crate::font_metrics::FontMetricsProvider;
 use crate::logical_geometry::WritingMode;
@@ -14,12 +13,15 @@ use crate::properties::{ComputedValues, StyleBuilder};
 use crate::properties::{LonghandId, LonghandIdSet, CSSWideKeyword};
 use crate::properties::{PropertyDeclaration, PropertyDeclarationId, DeclarationImportanceIterator};
 use crate::properties::CASCADE_PROPERTY;
+use crate::properties::VariableDeclaration;
+use crate::properties_and_values::{CustomPropertiesBuilder, RegisteredPropertySet};
 use crate::rule_cache::{RuleCache, RuleCacheConditions};
 use crate::rule_tree::{CascadeLevel, StrongRuleNode};
 use crate::selector_parser::PseudoElement;
 use crate::stylesheets::{Origin, PerOrigin};
+use cssparser::{Parser, ParserInput};
 use servo_arc::Arc;
-use crate::shared_lock::StylesheetGuards;
+use crate::shared_lock::{Locked, StylesheetGuards};
 use smallbitvec::SmallBitVec;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -87,6 +89,7 @@ pub fn cascade<E>(
     rule_cache: Option<&RuleCache>,
     rule_cache_conditions: &mut RuleCacheConditions,
     element: Option<E>,
+    registered_property_set: &Locked<RegisteredPropertySet>,
 ) -> Arc<ComputedValues>
 where
     E: TElement,
@@ -105,6 +108,7 @@ where
         rule_cache,
         rule_cache_conditions,
         element,
+        registered_property_set.read_with(guards.registered_property_set),
     )
 }
 
@@ -122,6 +126,7 @@ fn cascade_rules<E>(
     rule_cache: Option<&RuleCache>,
     rule_cache_conditions: &mut RuleCacheConditions,
     element: Option<E>,
+    registered_property_set: &RegisteredPropertySet,
 ) -> Arc<ComputedValues>
 where
     E: TElement,
@@ -183,6 +188,7 @@ where
         rule_cache,
         rule_cache_conditions,
         element,
+        registered_property_set,
     )
 }
 
@@ -219,6 +225,7 @@ pub fn apply_declarations<'a, E, F, I>(
     rule_cache: Option<&RuleCache>,
     rule_cache_conditions: &mut RuleCacheConditions,
     element: Option<E>,
+    registered_property_set: &RegisteredPropertySet,
 ) -> Arc<ComputedValues>
 where
     E: TElement,
@@ -243,21 +250,47 @@ where
     let inherited_style = parent_style.unwrap_or(device.default_computed_values());
 
     let mut declarations = SmallVec::<[(&_, CascadeLevel); 32]>::new();
-    let custom_properties = {
-        let mut builder = CustomPropertiesBuilder::new(
-            inherited_style.custom_properties(),
-            device.environment(),
-        );
+    // TODO(jyc) Try to avoid addrefing the names.
+    let mut font_size_references: Option<Vec<crate::custom_properties::Name>> = None;
+    let mut custom_properties_builder = CustomPropertiesBuilder::new(
+        Some(registered_property_set),
+        inherited_style.custom_properties(),
+        device.environment(),
+    );
 
-        for (declaration, cascade_level) in iter_declarations() {
-            declarations.push((declaration, cascade_level));
-            if let PropertyDeclaration::Custom(ref declaration) = *declaration {
-                builder.cascade(declaration, cascade_level.origin());
-            }
-        }
+    for (declaration, cascade_level) in iter_declarations() {
+        // Pull out all declarations from |iter_declarations()| into
+        // |declarations|.
+        declarations.push((declaration, cascade_level));
 
-        builder.build()
-    };
+        match declaration {
+            PropertyDeclaration::WithVariables(VariableDeclaration {
+                id: LonghandId::FontSize,
+                ref value,
+            }) => {
+                // Put references in |font-size| into |font_size_references|.
+                let mut input = ParserInput::new(&value.css);
+                let mut input = Parser::new(&mut input);
+                let mut references = crate::custom_properties::VarOrEnvReferences::default();
+                // Don't really need this, but parse_declaration_value_block expects it.
+                let mut missing_closing_characters = String::new();
+
+                let _ = crate::custom_properties::parse_declaration_value_block(
+                    &mut input,
+                    Some(&mut references),
+                    &mut missing_closing_characters,
+                );
+
+                font_size_references =
+                    Some(references.custom_property_references.into_iter().collect());
+            },
+            PropertyDeclaration::Custom(ref declaration) => {
+                // Cascade custom properties.
+                custom_properties_builder.cascade(declaration, cascade_level.origin());
+            },
+            _ => (),
+        };
+    }
 
     let mut context = computed::Context {
         is_root_element: pseudo.is_none() && element.map_or(false, |e| e.is_root()),
@@ -270,7 +303,9 @@ where
             parent_style_ignoring_first_line,
             pseudo,
             Some(rules.clone()),
-            custom_properties,
+            // We need the context to finish computing these; then we'll fill
+            // them in.
+            /* custom_properties */ None,
         ),
         cached_system_font: None,
         in_media_query: false,
@@ -279,15 +314,27 @@ where
         font_metrics_provider,
         quirks_mode,
         rule_cache_conditions: RefCell::new(rule_cache_conditions),
-        // XXX This is changed by a later patch in this series.
-        registered_property_set: None,
+        registered_property_set: Some(registered_property_set),
     };
+    // TODO(jyc) Rename this?
+    let (custom_properties, only_early_custom_properties, font_size_cyclical) =
+        custom_properties_builder.build_early(
+            Some(&context),
+            font_size_references
+                .as_ref()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
+    context.builder.custom_properties = custom_properties;
 
     let using_cached_reset_properties = {
         let mut cascade = Cascade::new(&mut context, cascade_mode);
 
-        cascade
-            .apply_properties::<EarlyProperties, _>(ApplyResetProperties::Yes, declarations.iter().cloned());
+        cascade.apply_properties::<EarlyProperties, _>(
+            ApplyResetProperties::Yes,
+            declarations.iter().cloned(),
+            font_size_cyclical,
+        );
 
         cascade.compute_visited_style_if_needed(
             element,
@@ -295,10 +342,29 @@ where
             parent_style_ignoring_first_line,
             layout_parent_style,
             guards,
+            registered_property_set,
         );
 
-        let using_cached_reset_properties =
-            cascade.try_to_use_cached_reset_properties(rule_cache, guards);
+        cascade.try_to_use_cached_reset_properties(rule_cache, guards)
+    };
+
+    if !only_early_custom_properties {
+        // Now that we've handled early properties, we can resolve late custom
+        // properties.
+        let mut custom_properties = (**context.builder.custom_properties.as_ref().unwrap()).clone();
+        crate::properties_and_values::resolve_late(
+            &context,
+            registered_property_set,
+            device.environment(),
+            &mut custom_properties,
+        );
+        context.builder.custom_properties = Some(Arc::new(custom_properties));
+    }
+
+    {
+        // ... and now that we've handled both early properties and late custom
+        // properties, we can handle late properties, which can depend on both.
+        let mut cascade = Cascade::new(&mut context, cascade_mode);
 
         let apply_reset = if using_cached_reset_properties {
             ApplyResetProperties::No
@@ -306,10 +372,14 @@ where
             ApplyResetProperties::Yes
         };
 
-        cascade.apply_properties::<LateProperties, _>(apply_reset, declarations.iter().cloned());
-
-        using_cached_reset_properties
-    };
+        // font-size is a (late) early property, so the value of
+        // font_size_cyclical should not be used by apply_properties.
+        cascade.apply_properties::<LateProperties, _>(
+            apply_reset,
+            declarations.iter().cloned(),
+            /* font_size_cyclical */ false,
+        );
+    }
 
     context.builder.clear_modified_reset();
 
@@ -318,7 +388,15 @@ where
             .adjust(layout_parent_style.unwrap_or(inherited_style), element);
     }
 
-    if context.builder.modified_reset() || using_cached_reset_properties {
+    if context.builder.modified_reset() ||
+        using_cached_reset_properties ||
+        context
+            .builder
+            .custom_properties
+            .as_ref()
+            .map(|p| p.has_uninherited)
+            .unwrap_or(false)
+    {
         // If we adjusted any reset structs, we can't cache this ComputedValues.
         //
         // Also, if we re-used existing reset structs, don't bother caching it
@@ -414,9 +492,21 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
                 .set_uncacheable();
         }
 
+        let custom_properties =
+            self.context
+                .builder
+                .custom_properties
+                .as_ref()
+                .map(
+                    |custom_properties| crate::properties_and_values::PVSubstitutionMap {
+                        registered_property_set: self.context.registered_property_set,
+                        custom_properties,
+                    },
+                );
+
         Cow::Owned(declaration.value.substitute_variables(
             declaration.id,
-            self.context.builder.custom_properties.as_ref(),
+            custom_properties.as_ref(),
             self.context.quirks_mode,
             self.context.device().environment(),
         ))
@@ -441,6 +531,7 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
         &mut self,
         apply_reset: ApplyResetProperties,
         declarations: I,
+        font_size_cyclical: bool,
     ) where
         Phase: CascadePhase,
         I: Iterator<Item = (&'decls PropertyDeclaration, CascadeLevel)>,
@@ -463,6 +554,10 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
                 PropertyDeclarationId::Longhand(id) => id,
                 PropertyDeclarationId::Custom(..) => continue,
             };
+
+            if font_size_cyclical && longhand_id == LonghandId::FontSize {
+                continue;
+            }
 
             let inherited = longhand_id.inherited();
             if !apply_reset && !inherited {
@@ -574,6 +669,7 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
         parent_style_ignoring_first_line: Option<&ComputedValues>,
         layout_parent_style: Option<&ComputedValues>,
         guards: &StylesheetGuards,
+        registered_property_set: &RegisteredPropertySet,
     ) where
         E: TElement,
     {
@@ -621,6 +717,7 @@ impl<'a, 'b: 'a> Cascade<'a, 'b> {
             /* rule_cache = */ None,
             &mut *self.context.rule_cache_conditions.borrow_mut(),
             element,
+            registered_property_set,
         );
         self.context.builder.visited_style = Some(style);
     }

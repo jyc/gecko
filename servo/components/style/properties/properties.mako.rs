@@ -31,6 +31,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use crate::media_queries::Device;
 use crate::parser::ParserContext;
 use crate::properties::longhands::system_font::SystemFont;
+use crate::properties_and_values::CustomPropertiesMap;
 use crate::selector_parser::PseudoElement;
 use selectors::parser::SelectorParseErrorKind;
 #[cfg(feature = "servo")] use servo_config::prefs;
@@ -1528,13 +1529,15 @@ impl ToCss for UnparsedValue {
 }
 
 impl UnparsedValue {
-    fn substitute_variables(
+    fn substitute_variables<M>(
         &self,
         longhand_id: LonghandId,
-        custom_properties: Option<<&Arc<crate::custom_properties::CustomPropertiesMap>>,
+        custom_properties: Option<<&M>,
         quirks_mode: QuirksMode,
         environment: &::custom_properties::CssEnvironment,
-    ) -> PropertyDeclaration {
+    ) -> PropertyDeclaration
+    where M: crate::custom_properties::SubstitutionMap
+    {
         let invalid_at_computed_value_time = || {
             let keyword = if longhand_id.inherited() {
                 CSSWideKeyword::Inherit
@@ -1547,19 +1550,26 @@ impl UnparsedValue {
             })
         };
 
-        // XXX This will be replaced by a later patch in this series.
-        let empty_custom_properties = Default::default();
-        let custom_properties =
-            custom_properties
-            .map(|x| &**x)
-            .unwrap_or(&empty_custom_properties);
+        let result = if let Some(custom_properties) = custom_properties {
+            crate::custom_properties::substitute(
+                &self.css,
+                self.first_token_type,
+                custom_properties,
+                environment,
+            )
+        } else {
+            // TODO(jyc) This is a hack because animation code calls this with
+            // custom_properties=None, for some reason.
+            let empty_custom_properties = crate::custom_properties::CustomPropertiesMap::default();
+            crate::custom_properties::substitute(
+                &self.css,
+                self.first_token_type,
+                &empty_custom_properties,
+                environment,
+            )
+        };
 
-        let css = match crate::custom_properties::substitute(
-            &self.css,
-            self.first_token_type,
-            custom_properties,
-            environment,
-        ) {
+        let css = match result {
             Ok(css) => css,
             Err(..) => return invalid_at_computed_value_time(),
         };
@@ -2734,7 +2744,7 @@ pub struct ComputedValuesInner {
     % for style_struct in data.active_style_structs():
         ${style_struct.ident}: Arc<style_structs::${style_struct.name}>,
     % endfor
-    custom_properties: Option<Arc<crate::custom_properties::CustomPropertiesMap>>,
+    custom_properties: Option<Arc<CustomPropertiesMap>>,
     /// The writing mode of this computed values struct.
     pub writing_mode: WritingMode,
 
@@ -2793,7 +2803,7 @@ impl ComputedValues {
     }
 
     /// Gets a reference to the custom properties map (if one exists).
-    pub fn custom_properties(&self) -> Option<<&Arc<crate::custom_properties::CustomPropertiesMap>> {
+    pub fn custom_properties(&self) -> Option<<&Arc<CustomPropertiesMap>> {
         self.custom_properties.as_ref()
     }
 
@@ -2862,7 +2872,7 @@ impl ComputedValues {
     /// Create a new refcounted `ComputedValues`
     pub fn new(
         _: Option<<&PseudoElement>,
-        custom_properties: Option<Arc<crate::custom_properties::CustomPropertiesMap>>,
+        custom_properties: Option<Arc<CustomPropertiesMap>>,
         writing_mode: WritingMode,
         flags: ComputedValueFlags,
         rules: Option<StrongRuleNode>,
@@ -3289,7 +3299,7 @@ pub struct StyleBuilder<'a> {
     /// node.
     pub rules: Option<StrongRuleNode>,
 
-    custom_properties: Option<Arc<crate::custom_properties::CustomPropertiesMap>>,
+    custom_properties: Option<Arc<CustomPropertiesMap>>,
 
     /// The pseudo-element this style will represent.
     pub pseudo: Option<<&'a PseudoElement>,
@@ -3324,7 +3334,7 @@ impl<'a> StyleBuilder<'a> {
         parent_style_ignoring_first_line: Option<<&'a ComputedValues>,
         pseudo: Option<<&'a PseudoElement>,
         rules: Option<StrongRuleNode>,
-        custom_properties: Option<Arc<crate::custom_properties::CustomPropertiesMap>>,
+        custom_properties: Option<Arc<CustomPropertiesMap>>,
     ) -> Self {
         debug_assert_eq!(parent_style.is_some(), parent_style_ignoring_first_line.is_some());
         #[cfg(feature = "gecko")]
@@ -3650,7 +3660,7 @@ impl<'a> StyleBuilder<'a> {
     ///
     /// Cloning the Arc here is fine because it only happens in the case where
     /// we have custom properties, and those are both rare and expensive.
-    fn custom_properties(&self) -> Option<<&Arc<crate::custom_properties::CustomPropertiesMap>> {
+    fn custom_properties(&self) -> Option<<&Arc<CustomPropertiesMap>> {
         self.custom_properties.as_ref()
     }
 
