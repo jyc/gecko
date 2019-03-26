@@ -6,9 +6,9 @@
 //!
 //! [custom]: https://drafts.csswg.org/css-variables/
 
-use crate::hash::map::Entry;
-use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
+use crate::hash::{map::Entry, HashMap};
 use crate::parser::ParserContext;
+use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
 use crate::properties_and_values;
 use crate::selector_map::{PrecomputedHashMap, PrecomputedHashSet, PrecomputedHasher};
 use crate::stylesheets::{Origin, PerOrigin};
@@ -20,8 +20,8 @@ use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp;
-use std::fmt::{self, Write};
-use std::hash::BuildHasherDefault;
+use std::fmt::{self, Debug, Write};
+use std::hash::{BuildHasherDefault, Hash};
 use std::ops::Deref;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use stylesheets::UrlExtraData;
@@ -700,10 +700,10 @@ impl<'a> CustomPropertiesBuilder<'a> {
 
                 // If the variable value has no references and it has an
                 // environment variable here, perform substitution here instead
-                // of forcing a full traversal in `substitute_all` afterwards.
+                // of forcing a full traversal in `resolve_all` afterwards.
                 let value = if !has_references && unparsed_value.references_environment {
                     let result =
-                        substitute_references_in_value(unparsed_value, &map, &self.environment);
+                        substitute_references_in_value(unparsed_value, map, &self.environment);
                     match result {
                         Ok(new_value) => Arc::new(VariableValue::computed(new_value)),
                         Err(..) => {
@@ -781,16 +781,131 @@ impl<'a> CustomPropertiesBuilder<'a> {
             None => return self.inherited.cloned(),
         };
         if self.may_have_cycles {
-            substitute_all(&mut map, self.environment);
+            resolve_all(&mut CustomResolutionMap{
+                map: &mut map,
+                environment: self.environment,
+            });
         }
         Some(Arc::new(map))
+    }
+}
+
+/// A set of named custom property values and operations for performing custom
+/// property dependency resolution on them.
+///
+/// This abstracts custom property dependency resolution for use by the
+/// Properties & Values API, which extends the dependency graph on custom
+/// properties to include various non-custom properties, e.g. font-size.
+///
+/// It is expected that the resolution process will call `names()` in order to
+/// get a list of properties to resolve, before calling `has_references(name)`
+/// and `references(name)` in order to determine edges to create in the
+/// dependency graph.
+///
+/// Finally, each property should be resolved, with a referenced property
+/// resolved before all its referents, by calling either `substitute(name)` to
+/// trigger substitution for the property, or `cyclical(name)` to mark the
+/// property as involved in a cycle.
+pub trait ResolutionMap {
+    /// A property name.
+    type Name: Clone + Debug + Eq + Hash;
+
+    /// Returns the list of names of properties to resolve.
+    fn names(&self) -> Vec<Self::Name>;
+
+    /// Returns whether the value for property `name` has any references.
+    fn has_references(&self, name: &Self::Name) -> bool;
+    /// Returns a Vec of all references in the value for property `name`.
+    fn references(&self, name: &Self::Name) -> Vec<Self::Name>;
+
+    /// Triggers substitution for the property `name`.
+    fn substitute(&mut self, name: &Self::Name);
+    /// Marks the property `name` as involved in a reference cycle.
+    fn cyclical(&mut self, name: &Self::Name);
+}
+
+struct CustomResolutionMap<'a> {
+    map: &'a mut CustomPropertiesMap,
+    environment: &'a CssEnvironment,
+}
+
+impl<'a> ResolutionMap for CustomResolutionMap<'a> {
+    type Name = Name;
+
+    fn names(&self) -> Vec<Self::Name> {
+        self.map.keys().cloned().collect()
+    }
+
+    fn has_references(&self, name: &Self::Name) -> bool {
+        self.map.get(name).map(|x| x.has_references()).unwrap_or(false)
+    }
+
+    fn references(&self, name: &Self::Name) -> Vec<Self::Name> {
+        // TODO: This involves creating a new Vec, which is not ideal, but which
+        // was what we previously did.
+        self.map.get(name).and_then(|x| x.references.as_ref()).map(|x| x.to_vec()).unwrap_or(vec![])
+    }
+
+    fn substitute(&mut self, name: &Self::Name) {
+        // The compiler doesn't like us using self.map.get in the same scope as
+        // self.map.insert/remove.
+        enum Result {
+            Cloned(Arc<VariableValue>),
+            Substituted(Option<TokenStream>),
+        }
+
+        let result = {
+            let value = match self.map.get(name) {
+                Some(value) => value,
+                None => {
+                    // This name was referenced but not declared. It's
+                    // substituted value is just the initial value, so we don't
+                    // need to do anything.
+                    return;
+                }
+            };
+            if value.is_computed() {
+                // Optimization: if the value has no ExtraData, we can just
+                // share the Arc and return early.
+                Result::Cloned(value.clone())
+            } else if !value.has_references() {
+                // Otherwise, as the value has no references, `result` =
+                // `value`.
+                Result::Substituted(Some(value.token_stream.clone()))
+            } else {
+                // The value has references. Perform variable substitution.
+                Result::Substituted(substitute_references_in_value(&value, self.map, &self.environment).ok())
+            }
+        };
+
+        match result {
+            Result::Cloned(value) => {
+                self.map.insert(name.clone(), value);
+            },
+            Result::Substituted(Some(value)) => {
+                self.map.insert(name.clone(), Arc::new(VariableValue::computed(value)));
+            },
+            Result::Substituted(None) => {
+                // If we failed to perform substitution (e.g. because this variable
+                // references an undefined variable), this variable should resolve
+                // to undefined as well.
+                self.map.remove(name);
+            },
+        }
+    }
+
+    fn cyclical(&mut self, name: &Self::Name) {
+        self.map.remove(name);
     }
 }
 
 /// Resolve all custom properties to either substituted or invalid.
 ///
 /// It does cycle dependencies removal at the same time as substitution.
-fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: &CssEnvironment) {
+pub fn resolve_all<M>(map: &mut M)
+where
+    M: ResolutionMap,
+{
     // The cycle dependencies removal in this function is a variant
     // of Tarjan's algorithm. It is mostly based on the pseudo-code
     // listed in
@@ -799,12 +914,12 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
 
     /// Struct recording necessary information for each variable.
     #[derive(Debug)]
-    struct VarInfo {
+    struct VarInfo<N> {
         /// The name of the variable. It will be taken to save addref
         /// when the corresponding variable is popped from the stack.
         /// This also serves as a mark for whether the variable is
         /// currently in the stack below.
-        name: Option<Name>,
+        name: Option<N>,
         /// If the variable is in a dependency cycle, lowlink represents
         /// a smaller index which corresponds to a variable in the same
         /// strong connected component, which is known to be accessible
@@ -814,20 +929,21 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
     /// Context struct for traversing the variable graph, so that we can
     /// avoid referencing all the fields multiple times.
     #[derive(Debug)]
-    struct Context<'a> {
+    struct Context<'a, M: 'a, N>
+    where
+        N: Eq + Hash,
+    {
         /// Number of variables visited. This is used as the order index
         /// when we visit a new unresolved variable.
         count: usize,
         /// The map from custom property name to its order index.
-        index_map: PrecomputedHashMap<Name, usize>,
+        index_map: PrecomputedHashMap<N, usize>,
         /// Information of each variable indexed by the order index.
-        var_info: SmallVec<[VarInfo; 5]>,
+        var_info: SmallVec<[VarInfo<N>; 5]>,
         /// The stack of order index of visited variables. It contains
         /// all unfinished strong connected components.
         stack: SmallVec<[usize; 5]>,
-        map: &'a mut CustomPropertiesMap,
-        /// The environment to substitute `env()` variables.
-        environment: &'a CssEnvironment,
+        map: &'a mut M,
     }
 
     /// This function combines the traversal for cycle removal and value
@@ -848,20 +964,12 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
     ///   doesn't have reference at all in specified value, or it has
     ///   been completely resolved.
     /// * There is no such variable at all.
-    fn traverse<'a>(name: Name, context: &mut Context<'a>) -> Option<usize> {
+    fn traverse<'a, M>(name: M::Name, context: &mut Context<'a, M, M::Name>) -> Option<usize>
+    where
+        M: ResolutionMap,
+    {
         // Some shortcut checks.
-        let (name, value) = {
-            let value = context.map.get(&name)?;
-
-            // Nothing to resolve.
-            if !value.has_references() {
-                debug_assert!(
-                    !value.references_environment,
-                    "Should've been handled earlier"
-                );
-                return None;
-            }
-
+        let (name, references) = {
             // Whether this variable has been visited in this traversal.
             let key;
             match context.index_map.entry(name) {
@@ -874,9 +982,16 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
                 },
             }
 
+            // Nothing to resolve.
+            if !context.map.has_references(&key) {
+                context.map.substitute(&key);
+                return None;
+            }
+
             // Hold a strong reference to the value so that we don't
             // need to keep reference to context.map.
-            (key, value.clone())
+            let references = context.map.references(&key);
+            (key, references)
         };
 
         // Add new entry to the information table.
@@ -891,28 +1006,26 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
 
         let mut self_ref = false;
         let mut lowlink = index;
-        value.references.as_ref().map_or((), |references| {
-            references.iter().for_each(|next| {
-                let next_index = match traverse(next.clone(), context) {
-                    Some(index) => index,
-                    // There is nothing to do if the next variable has been
-                    // fully resolved at this point.
-                    None => return,
-                };
-                let next_info = &context.var_info[next_index];
-                if next_index > index {
-                    // The next variable has a larger index than us, so it
-                    // must be inserted in the recursive call above. We want
-                    // to get its lowlink.
-                    lowlink = cmp::min(lowlink, next_info.lowlink);
-                } else if next_index == index {
-                    self_ref = true;
-                } else if next_info.name.is_some() {
-                    // The next variable has a smaller order index and it is
-                    // in the stack, so we are at the same component.
-                    lowlink = cmp::min(lowlink, next_index);
-                }
-            })
+        references.iter().for_each(|next| {
+            let next_index = match traverse(next.clone(), context) {
+                Some(index) => index,
+                // There is nothing to do if the next variable has been
+                // fully resolved at this point.
+                None => return,
+            };
+            let next_info = &context.var_info[next_index];
+            if next_index > index {
+                // The next variable has a larger index than us, so it
+                // must be inserted in the recursive call above. We want
+                // to get its lowlink.
+                lowlink = cmp::min(lowlink, next_info.lowlink);
+            } else if next_index == index {
+                self_ref = true;
+            } else if next_info.name.is_some() {
+                // The next variable has a smaller order index and it is
+                // in the stack, so we are at the same component.
+                lowlink = cmp::min(lowlink, next_index);
+            }
         });
 
         context.var_info[index].lowlink = lowlink;
@@ -950,30 +1063,19 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
             // Anything here is in a loop which can traverse to the
             // variable we are handling, so remove it from the map, it's invalid
             // at computed-value time.
-            context.map.remove(&var_name);
+            context.map.cyclical(&var_name);
             in_loop = true;
         }
         if in_loop {
             // This variable is in loop. Resolve to invalid.
-            context.map.remove(&name);
+            context.map.cyclical(&name);
             return None;
         }
 
         // Now we have shown that this variable is not in a loop, and
         // all of its dependencies should have been resolved. We can
         // start substitution now.
-        let result = substitute_references_in_value(&value, &context.map, &context.environment);
-
-        match result {
-            Ok(computed_value) => {
-                context
-                    .map
-                    .insert(name, Arc::new(VariableValue::computed(computed_value)));
-            },
-            Err(..) => {
-                context.map.remove(&name);
-            },
-        }
+        context.map.substitute(&name);
 
         // All resolved, so return the signal value.
         None
@@ -981,26 +1083,60 @@ fn substitute_all(custom_properties_map: &mut CustomPropertiesMap, environment: 
 
     // We have to clone the names so that we can mutably borrow the map
     // in the context we create for traversal.
-    let names: Vec<_> = custom_properties_map.keys().cloned().collect();
+    let names = map.names();
     for name in names.into_iter() {
         let mut context = Context {
             count: 0,
-            index_map: PrecomputedHashMap::default(),
+            index_map: HashMap::default(),
             stack: SmallVec::new(),
             var_info: SmallVec::new(),
-            map: custom_properties_map,
-            environment,
+            map,
         };
         traverse(name, &mut context);
     }
 }
 
+/// A map from custom property names to token stream references for
+/// performing custom property substitution.
+///
+/// With the Properties & Values API, custom properties can be registered as
+/// having initial values. This abstraction permits implementations to return
+/// for such properties a reference to the parsed initial value stored on the
+/// registration, rather than having to maintain any data itself.
+pub trait SubstitutionMap {
+    /// Returns the value that should be substituted for a reference to the
+    /// property `name`, or None if the value of `name` is the initial empty
+    /// value.
+    fn get(&self, name: &Name) -> Option<&TokenStream>;
+}
+
+impl SubstitutionMap for CustomPropertiesMap {
+    fn get(&self, name: &Name) -> Option<&TokenStream> {
+        match CustomPropertiesMap::get(self, name) {
+            Some(var) => Some(&var.token_stream),
+            None => None,
+        }
+    }
+}
+
+/// A SubstitutionMap that maps all properties to the initial empty value.
+pub struct EmptySubstitutionMap;
+
+impl SubstitutionMap for EmptySubstitutionMap {
+    fn get(&self, _name: &Name) -> Option<&TokenStream> {
+        None
+    }
+}
+
 /// Replace `var()` and `env()` functions in a pre-existing variable value.
-fn substitute_references_in_value<'i>(
+pub fn substitute_references_in_value<'i, M>(
     value: &'i VariableValue,
-    custom_properties: &CustomPropertiesMap,
+    custom_properties: &M,
     environment: &CssEnvironment,
-) -> Result<TokenStream, ParseError<'i>> {
+) -> Result<TokenStream, ParseError<'i>>
+where
+    M: SubstitutionMap,
+{
     debug_assert!(value.has_references() || value.references_environment);
 
     let mut input = ParserInput::new(&value.css);
@@ -1030,13 +1166,16 @@ fn substitute_references_in_value<'i>(
 ///
 /// Return `Err(())` if `input` is invalid at computed-value time.
 /// or `Ok(last_token_type that was pushed to partial_computed_value)` otherwise.
-fn substitute_block<'i>(
+fn substitute_block<'i, M>(
     input: &mut Parser<'i, '_>,
     position: &mut (SourcePosition, TokenSerializationType),
     partial_computed_value: &mut TokenStream,
-    custom_properties: &CustomPropertiesMap,
+    custom_properties: &M,
     env: &CssEnvironment,
-) -> Result<TokenSerializationType, ParseError<'i>> {
+) -> Result<TokenSerializationType, ParseError<'i>>
+where
+    M: SubstitutionMap,
+{
     let mut last_token_type = TokenSerializationType::nothing();
     let mut set_position_at_next_iteration = false;
     loop {
@@ -1085,7 +1224,7 @@ fn substitute_block<'i>(
                     let value = if is_env {
                         env.get(&name)
                     } else {
-                        custom_properties.get(&name).map(|v| &v.token_stream)
+                        custom_properties.get(&name)
                     };
 
                     if let Some(v) = value {
@@ -1150,26 +1289,24 @@ fn substitute_block<'i>(
 /// Replace `var()` and `env()` functions for a non-custom property.
 ///
 /// Return `Err(())` for invalid at computed time.
-pub fn substitute<'i>(
+pub fn substitute<'i, M>(
     input: &'i str,
     first_token_type: TokenSerializationType,
-    computed_values_map: Option<&Arc<CustomPropertiesMap>>,
+    custom_properties: &M,
     env: &CssEnvironment,
-) -> Result<String, ParseError<'i>> {
+) -> Result<String, ParseError<'i>>
+where
+    M: SubstitutionMap
+{
     let mut substituted = Default::default();
     let mut input = ParserInput::new(input);
     let mut input = Parser::new(&mut input);
     let mut position = (input.position(), first_token_type);
-    let empty_map = CustomPropertiesMap::default();
-    let custom_properties = match computed_values_map {
-        Some(m) => &**m,
-        None => &empty_map,
-    };
     let last_token_type = substitute_block(
         &mut input,
         &mut position,
         &mut substituted,
-        &custom_properties,
+        custom_properties,
         env,
     )?;
     substituted.push_from(&input, position, last_token_type)?;
