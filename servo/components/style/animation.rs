@@ -513,6 +513,10 @@ where
 
             // This currently ignores visited styles, which seems acceptable,
             // as existing browsers don't appear to animate visited styles.
+            let registered_property_set =
+                context.stylist
+                       .registered_property_set()
+                       .read_with(context.guards.registered_property_set);
             let computed = properties::apply_declarations::<E, _, _>(
                 context.stylist.device(),
                 /* pseudo = */ None,
@@ -530,6 +534,7 @@ where
                 /* rule_cache = */ None,
                 &mut Default::default(),
                 /* element = */ None,
+                registered_property_set,
             );
             computed
         },

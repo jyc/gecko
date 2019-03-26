@@ -960,8 +960,7 @@ impl Stylist {
             rule_cache,
             rule_cache_conditions,
             element,
-            // XXX Added by later patch in this series.
-            // self.registered_property_set(),
+            self.registered_property_set(),
         )
     }
 
@@ -1386,6 +1385,9 @@ impl Stylist {
 
         // We don't bother inserting these declarations in the rule tree, since
         // it'd be quite useless and slow.
+        let registered_property_set =
+            self.registered_property_set()
+                .read_with(guards.registered_property_set);
         properties::apply_declarations::<E, _, _>(
             &self.device,
             /* pseudo = */ None,
@@ -1403,6 +1405,7 @@ impl Stylist {
             /* rule_cache = */ None,
             &mut Default::default(),
             /* element = */ None,
+            registered_property_set,
         )
     }
 

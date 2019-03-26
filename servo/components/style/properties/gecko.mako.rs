@@ -12,7 +12,7 @@
 
 use crate::Atom;
 use app_units::Au;
-use crate::custom_properties::CustomPropertiesMap;
+use crate::properties_and_values::CustomPropertiesMap;
 use crate::gecko_bindings::bindings;
 % for style_struct in data.style_structs:
 use crate::gecko_bindings::structs::${style_struct.gecko_ffi_name};
