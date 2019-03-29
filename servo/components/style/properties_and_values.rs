@@ -6,19 +6,23 @@
 //!
 //! [spec]: https://drafts.css-houdini.org/css-properties-values-api-1/
 
-use crate::custom_properties::{self, Name, TokenStream};
+use crate::custom_properties::{self, CssEnvironment, EmptySubstitutionMap, ExtraData, Name, ResolutionMap, substitute_references_in_value, SubstitutionMap, TokenStream, VariableValue};
 use crate::media_queries::Device;
-use crate::properties::CSSWideKeyword;
+use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValue};
 use crate::properties::longhands::transform;
+use crate::selector_map::PrecomputedHashSet;
+use crate::stylesheets::{Origin, PerOrigin};
 use crate::Atom;
 use cssparser::{BasicParseError, BasicParseErrorKind, Parser, ParserInput, Token};
 use parser::{Parse, ParserContext};
+use servo_arc::Arc;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::vec::Vec;
 use style_traits::values::{CssWriter, OneOrMoreSeparated, Space, ToCss};
-use style_traits::{self, StyleParseErrorKind};
+use style_traits::{self, ParsingMode, StyleParseErrorKind};
 use values::computed::{self, ToComputedValue};
 use values::{self, specified};
 
@@ -1208,4 +1212,755 @@ impl DerefMut for CustomPropertiesMap {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.untyped_map
     }
+}
+
+enum ComputationResult {
+    Shareable,
+    Computed(VariableValue),
+    Error,
+}
+
+fn compute_substituted_value(
+    context: Option<&computed::Context>,
+    registration: Option<&Registration>,
+    substituted_value: TokenStream,
+    extra: &ExtraData,
+) -> ComputationResult {
+    match (extra, registration) {
+        (ExtraData::Specified(_), None) => {
+            ComputationResult::Computed(VariableValue::computed(substituted_value))
+        }
+        (ExtraData::Computed, _) => ComputationResult::Shareable,
+        (ExtraData::Precomputed(_), _) => ComputationResult::Shareable,
+
+        // Compute uncomputed typed custom property values.
+        (ExtraData::Specified(ref url_data), Some(&Registration { ref syntax, .. })) => {
+            let context = context.expect("compute_substituted_value: can't compute typed custom property value without Context");
+            let parser_context = ParserContext::new(
+                Origin::Author,
+                url_data,
+                /* rule_type */ None,
+                ParsingMode::DEFAULT,
+                context.quirks_mode,
+                /* error_reporter */ None,
+                /* use_counters */ None,
+            );
+            let mut input = ParserInput::new(&substituted_value.css);
+            let mut input = Parser::new(&mut input);
+            // TODO In the future, we might want to save the
+            // ComputedValue so that Typed OM can use it. Right now
+            // we only keep the serialization.
+            // XXX(jyc) This should become ExtraData::Precomputed and then
+            // computed token stream. We shouldn't throw away the
+            // ComputedValue...
+            syntax
+                .parse(&parser_context, &mut input)
+                .ok()
+                .and_then(|parsed_value| parsed_value.to_computed_value(context).ok())
+                .map(|computed_value| ComputationResult::Computed((&computed_value).into()))
+                .unwrap_or(ComputationResult::Error)
+        }
+    }
+}
+
+/// A SubstitutionMap that fills in the initial values of of registered custom
+/// properties.
+pub struct PVSubstitutionMap<'a> {
+    /// Custom property registrations. This is used to provide the
+    /// initial values lacking entries in `custom_properties`.
+    pub registered_property_set: Option<&'a RegisteredPropertySet>,
+
+    /// Custom property values.
+    pub custom_properties: &'a CustomPropertiesMap,
+}
+
+impl<'a> SubstitutionMap for PVSubstitutionMap<'a> {
+    fn get(&self, name: &Name) -> Option<&TokenStream> {
+        if let Some(var) = self.custom_properties.get(name) {
+            debug_assert!(!var.has_references());
+            return Some(&var.token_stream);
+        }
+
+        let initial_value = self
+            .registered_property_set
+            .and_then(|rps| rps.get(name))
+            .and_then(|r| r.initial_value.as_ref());
+
+        if let Some(&(ref _value, ref css)) = initial_value {
+            return Some(css);
+        }
+
+        None
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PVName {
+    Variable(Name),
+    FontSize,
+}
+
+impl Hash for PVName {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // custom_properties::resolve_all uses a PrecomputedHashMap with
+        // ResolutionMap::Name as the key type. A PrecomputedHashMap is a
+        // HashMap using a PrecomputedHasher; a PrecomputedHasher expects
+        // Hasher::write_u32 to be called once, and just returns that for
+        // Hasher::finish. custom_properties::Name does this; we implement Hash
+        // here to do this for PVName.
+        match *self {
+            PVName::Variable(ref name) => name.hash(state),
+            PVName::FontSize => state.write_u32(0),
+        }
+    }
+}
+
+fn detect_ems<'i, 'tt>(input: &mut Parser<'i, 'tt>) -> Result<bool, cssparser::ParseError<'i, ()>> {
+    while !input.is_exhausted() {
+        let token = input.next()?.clone();
+        // We have to descend into functions.
+        match token {
+            Token::Function(_) => {
+                if input.parse_nested_block(detect_ems).unwrap() {
+                    return Ok(true);
+                }
+            }
+            Token::Dimension { ref unit, .. } => {
+                if unit.eq_ignore_ascii_case("em") || unit.eq_ignore_ascii_case("rem") {
+                    return Ok(true);
+                }
+            }
+            _ => (),
+        }
+    }
+    Ok(false)
+}
+
+struct PVResolutionMap<'a, 'b: 'a> {
+    // Inputs
+
+    // Might be needed for computation. None if we should just not compute,
+    // a hack for declaration_block. TODO Fix this!
+    context: Option<&'a computed::Context<'b>>,
+    registered_property_set: Option<&'a RegisteredPropertySet>,
+    environment: &'a CssEnvironment,
+    font_size_references: Option<&'a [Name]>,
+
+    // Outputs
+    // font_size_dependent and font_size_cyclical are only populated for early
+    // resolution maps.
+
+    font_size_dependent: Option<PrecomputedHashSet<Name>>,
+    font_size_cyclical: bool,
+    custom_properties: &'a mut CustomPropertiesMap,
+}
+
+impl<'a, 'b: 'a> PVResolutionMap<'a, 'b> {
+    // Create a PVResolutionMap for the resolution of early custom properties
+    // (i.e. those independent of standard properties, e.g. font-size), and for
+    // the identification of font-size-dependent properties and whether
+    // font-size is involved in a dependency cycle.
+    //
+    // The computed `context` is necessary to compute relative URL values.
+    //
+    // TODO(jyc) It is an Option right now because declaration_block performs
+    // custom property resolution on its own without access to a
+    // computed::Context, for some reason. Should we fix this?
+    //
+    // `substitute`, when called on late custom properties, will no-op.
+    fn new_early(
+        context: Option<&'a computed::Context<'b>>,
+        registered_property_set: Option<&'a RegisteredPropertySet>,
+        environment: &'a CssEnvironment,
+        font_size_references: &'a [Name],
+
+        custom_properties: &'a mut CustomPropertiesMap,
+    ) -> PVResolutionMap<'a, 'b> {
+        let mut font_size_dependent: Option<PrecomputedHashSet<Name>> = None;
+
+        // Populate font_size_dependent with the properties which need to be
+        // computed after font-size (and which might create cycles if font-size
+        // refers to them).
+        for (name, value) in custom_properties.iter() {
+            let registration = registered_property_set.and_then(|set| set.get(name));
+            let syntax_has_length_component =
+                registration
+                .map_or(false, |r| r.syntax.has_length_component());
+            if !syntax_has_length_component {
+                continue;
+            }
+
+            let mut input = ParserInput::new(&value.css);
+            let mut input = Parser::new(&mut input);
+            if detect_ems(&mut input).unwrap() {
+                font_size_dependent
+                    .get_or_insert_with(|| Default::default())
+                    .insert(name.clone());
+            }
+        }
+
+        PVResolutionMap {
+            context,
+            registered_property_set,
+            environment,
+            font_size_references: Some(font_size_references),
+
+            font_size_dependent,
+            font_size_cyclical: false,
+            custom_properties,
+        }
+    }
+
+    // Create a PVResolutionMap for the resolution of late custom properties
+    // (i.e. those dependent on standard properties, e.g. font-size).
+    //
+    // `substitute`, when called on a custom property with no references, will
+    // no-op (as it would if the map were created using `new_early`). This means
+    // that early custom properties which have already been resolved will not
+    // incur extra work. `substitute` called on all other properties will
+    // perform resolution and computation as expected.
+    fn new_late(
+        context: &'a computed::Context<'b>,
+        registered_property_set: &'a RegisteredPropertySet,
+        environment: &'a CssEnvironment,
+
+        custom_properties: &'a mut CustomPropertiesMap,
+    ) -> PVResolutionMap<'a, 'b> {
+        PVResolutionMap {
+            context: Some(context),
+            registered_property_set: Some(registered_property_set),
+            environment,
+            font_size_references: None,
+
+            font_size_dependent: None,
+            font_size_cyclical: false,
+            custom_properties,
+        }
+    }
+}
+
+impl<'a, 'b: 'a> ResolutionMap for PVResolutionMap<'a, 'b> {
+    type Name = PVName;
+
+    fn names(&self) -> Vec<PVName> {
+        let mut names: Vec<PVName> = self
+            .custom_properties
+            .iter()
+            .map(|(name, _)| PVName::Variable(name.clone()))
+            .collect();
+
+        if matches!(self.font_size_references, Some(r) if r.len() > 0) {
+            names.push(PVName::FontSize);
+        }
+        names
+    }
+
+    fn has_references(&self, name: &PVName) -> bool {
+        match *name {
+            PVName::Variable(ref name) => {
+                // Return whether the custom property is in the custom
+                // properties map and either has variable references or is for a
+                // typed property whose syntax has a length component.
+                let has_references = self
+                    .custom_properties
+                    .get(name)
+                    .map_or(false, |value| value.has_references());
+                has_references
+                    || self
+                        .font_size_dependent
+                        .as_ref()
+                        .map_or(false, |d| d.contains(name))
+            }
+            PVName::FontSize => {
+                self.font_size_references.map_or(false, |r| r.len() > 0)
+            }
+        }
+    }
+
+    fn references(&self, name: &PVName) -> Vec<PVName> {
+        match *name {
+            PVName::Variable(ref name) => {
+                let mut references = self
+                    .custom_properties
+                    .get(name)
+                    .and_then(|value| value.references.as_ref())
+                    .map_or(vec![], |names| {
+                        names
+                            .iter()
+                            .map(|name| PVName::Variable(name.clone()))
+                            .collect()
+                    });
+                // https://drafts.css-houdini.org/css-properties-values-api/#dependency-cycles-via-relative-units
+                if self
+                    .font_size_dependent
+                    .as_ref()
+                    .map_or(false, |s| s.contains(name))
+                {
+                    references.push(PVName::FontSize);
+                }
+                references
+            }
+            PVName::FontSize => self.font_size_references.map_or(vec![], |r| {
+                r.iter()
+                    .map(|name| PVName::Variable(name.clone()))
+                    .collect()
+            }),
+        }
+    }
+
+    fn substitute(&mut self, name: &PVName) {
+        match *name {
+            PVName::Variable(ref name) => {
+                // We are only substituting early, non-font-size-dependent
+                // custom properties here.
+                //
+                // What about properties that depend on font-size-dependent
+                // properties? We will check for them later.
+                if self
+                    .font_size_dependent
+                    .as_ref()
+                    .map_or(false, |s| s.contains(name))
+                {
+                    return;
+                }
+
+                // First, substitute references in the variable value to obtain
+                // a substituted value.
+                let substituted = {
+                    // We get value in here so that we don't have to keep its
+                    // borrow of self.custom_properties, because at the end we
+                    // mutably borrow that to insert/remove.
+                    let (value, extra) = match self.custom_properties.get(name) {
+                        Some(value) => (value, value.extra.clone()),
+                        None => {
+                            return;
+                        }
+                    };
+                    if !value.has_references() {
+                        // XXX(jyc) Would be nice to only clone this if we
+                        // don't return ComputationResult::Shareable.
+                        Some((value.token_stream.clone(), extra))
+                    } else {
+                        // Check if we depend on a font-size-dependent property.
+                        match (&value.references, &mut self.font_size_dependent) {
+                            (&Some(ref references), &mut Some(ref mut font_size_dependent)) => {
+                                let is_font_size_dependent = references
+                                    .iter()
+                                    .filter(|name| font_size_dependent.contains(*name))
+                                    .next()
+                                    .is_some();
+                                if is_font_size_dependent {
+                                    // Mark that we are font-size-dependent so
+                                    // things that depend on us will be so marked as
+                                    // well.
+                                    // XXX(jyc) Would be nice to get rid of the
+                                    // name.clone(). Just didn't have time to work
+                                    // out how to tell rustc that the PVName's
+                                    // lifetime should contain
+                                    // self.custom_properties_map.
+                                    font_size_dependent.insert(name.clone());
+                                    return;
+                                }
+                            }
+                            _ => (),
+                        }
+
+                        // |ok()| lets us drop the lifetime bound on the Err
+                        // case that ties the returned value to our borrow of
+                        // self.custom_properties.
+                        custom_properties::substitute_references_in_value(
+                            value,
+                            &PVSubstitutionMap {
+                                registered_property_set: self.registered_property_set,
+                                custom_properties: &*self.custom_properties,
+                            },
+                            self.environment,
+                        )
+                        .map(|substituted_value| (substituted_value, extra))
+                        .ok()
+                    }
+                };
+
+                // Next, compute the substituted value. If this is an untyped
+                // property, its computed value is just its substituted value,
+                // but if this is is a typed property we need to try and compute
+                // it.
+                let computed_value = substituted
+                    .map(|(substituted_value, extra)| {
+                        let registration =
+                            self.registered_property_set.and_then(|set| set.get(name));
+                        compute_substituted_value(
+                            self.context,
+                            registration,
+                            substituted_value,
+                            &extra,
+                        )
+                    })
+                    .unwrap_or(ComputationResult::Error);
+
+                // Finally, insert the computed value into the output map of
+                // computed custom properties, replacing its uncomputed value,
+                // or replace it with its initial value it if we failed to
+                // compute.
+                match computed_value {
+                    ComputationResult::Shareable => {
+                        let shared_value = self.custom_properties.get(name).unwrap().clone();
+                        self.custom_properties.insert(name.clone(), shared_value);
+                    }
+                    ComputationResult::Computed(computed_value) => {
+                        self.custom_properties
+                            .insert(name.clone(), Arc::new(computed_value));
+                    }
+                    ComputationResult::Error => {
+                        self.custom_properties.remove(name);
+                    }
+                }
+            }
+            // We aren't actually going to substitute anything depending on
+            // font-size in this pass, so we don't need to substitute references
+            // in font-size. That'll be handled by |cascade| before we
+            // substitute the non-early custom properties.
+            PVName::FontSize => (),
+        }
+    }
+
+    fn cyclical(&mut self, name: &PVName) {
+        match *name {
+            PVName::Variable(ref name) => {
+                self.custom_properties.remove(name);
+                // The variable has been unset; its initial value is
+                // necessarily font-size-independent.
+                self.font_size_dependent.as_mut().map(|d| d.remove(name));
+            }
+            PVName::FontSize => {
+                self.font_size_cyclical = true;
+            }
+        }
+    }
+}
+
+/// A struct that takes care of encapsulating the cascade process for custom
+/// properties.
+pub struct CustomPropertiesBuilder<'a> {
+    // Inputs
+
+    registered_property_set: Option<&'a RegisteredPropertySet>,
+    // This is an Arc so that we can just clone it if no custom properties were
+    // set.
+    parent_properties: Option<&'a Arc<CustomPropertiesMap>>,
+    environment: &'a CssEnvironment,
+
+    // State
+
+    seen: PrecomputedHashSet<&'a Name>,
+    reverted: PerOrigin<PrecomputedHashSet<&'a Name>>,
+    may_require_resolution: bool,
+
+    // Outputs
+
+    result_properties: Option<CustomPropertiesMap>,
+}
+
+impl<'a> CustomPropertiesBuilder<'a> {
+    /// Create a new builder, inheriting from a given custom properties map.
+    pub fn new(
+        registered_property_set: Option<&'a RegisteredPropertySet>,
+        parent_properties: Option<&'a Arc<CustomPropertiesMap>>,
+        environment: &'a CssEnvironment,
+    ) -> Self {
+        Self {
+            registered_property_set,
+            parent_properties,
+            environment,
+
+            seen: Default::default(),
+            reverted: Default::default(),
+            may_require_resolution: false,
+
+            result_properties: None,
+        }
+    }
+
+    fn registration(&self, name: &Name) -> Option<&Registration> {
+        self.registered_property_set
+            .and_then(|rps| rps.registrations.get(name))
+    }
+
+    // Takes self.parent_properties and removes uninherited properties (if any)
+    // to yield a new non-empty initial map to be used to initialize
+    // result_properties, or None otherwise.
+    fn inherited_properties(&self) -> Option<CustomPropertiesMap> {
+        match self.parent_properties {
+            Some(properties) if properties.has_uninherited => {
+                let mut inherited_properties: CustomPropertiesMap = (**properties).clone();
+                properties
+                    .iter()
+                    .for_each(|(name, _)| match self.registration(name) {
+                        Some(Registration { inherits: false, .. }) => {
+                            inherited_properties.remove(name);
+                        },
+                        _ => (),
+                    });
+                if inherited_properties.is_empty() {
+                    return None;
+                }
+                Some(inherited_properties)
+            }
+            x => x.map(|x| (**x).clone()),
+        }
+    }
+
+    /// Cascade a given custom property declaration.
+    pub fn cascade(&mut self, declaration: &'a CustomDeclaration, origin: Origin) {
+        let CustomDeclaration {
+            ref name,
+            ref value,
+        } = *declaration;
+
+        if self.reverted.borrow_for_origin(&origin).contains(&name) {
+            return;
+        }
+
+        let was_already_present = !self.seen.insert(name);
+        if was_already_present {
+            return;
+        }
+
+        if !self.value_may_affect_style(name, value) {
+            return;
+        }
+
+        if self.result_properties.is_none() {
+            self.result_properties = Some(self.inherited_properties().unwrap_or_default());
+        }
+        let map = self.result_properties.as_mut().unwrap();
+
+        // Can't use `self.registration` because we borrow `self` mutably when
+        // we borrow `self.result_properties` mutably above.
+        let registration = self
+            .registered_property_set
+            .and_then(|rps| rps.registrations.get(name));
+
+        let inherits = registration.map_or(true, |r| r.inherits);
+        if !inherits {
+            map.has_uninherited = true;
+        }
+
+        match (value, inherits) {
+            (&CustomDeclarationValue::Value(ref unparsed_value), _) => {
+                let has_references = unparsed_value.has_references();
+                self.may_require_resolution |= has_references;
+                if !self.may_require_resolution {
+                    // We could make this check more fine-grained by parsing the
+                    // value and looking for font-size references, as in
+                    // PVResolutionMap::new_early.
+                    let might_depend_on_font_size = registration
+                        .map(|r| &r.syntax)
+                        .map_or(false, Syntax::has_length_component);
+                    self.may_require_resolution |= might_depend_on_font_size;
+                }
+
+                // If the variable value doesn't require resolution but contains
+                // an environment variable reference, perform substitution here
+                // instead of forcing a full traversal in `resolve_all`
+                // afterwards (if we're doing resolution anyways, don't bother.)
+                let should_substitute_environment_references =
+                    !self.may_require_resolution &&
+                    unparsed_value.references_environment;
+                let value = if should_substitute_environment_references {
+                    debug_assert!(!unparsed_value.is_computed());
+                    let substituted_value = substitute_references_in_value(
+                        unparsed_value,
+                        &EmptySubstitutionMap {},
+                        &self.environment,
+                    )
+                    .ok();
+
+                    if let Some(value) = substituted_value {
+                        Arc::new(VariableValue::computed(value))
+                    } else {
+                        map.remove(name);
+                        return;
+                    }
+                } else {
+                    unparsed_value.clone()
+                };
+                map.insert(name.clone(), value);
+            }
+
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Revert), _) => {
+                self.seen.remove(name);
+                for origin in origin.following_including() {
+                    self.reverted.borrow_mut_for_origin(&origin).insert(name);
+                }
+            }
+
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Initial), false)
+            | (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Unset), false) => {
+                unreachable!()
+            }
+
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Inherit), false) => {
+                if let Some(parent_value) = self.parent_properties.and_then(|ps| ps.get(name)) {
+                    map.insert(name.clone(), parent_value.clone());
+                }
+            }
+
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Inherit), true)
+            | (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Unset), true) => {
+                unreachable!()
+            }
+
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Initial), true) => {
+                map.remove(name);
+            }
+        }
+    }
+
+    fn value_may_affect_style(&self, name: &Name, value: &CustomDeclarationValue) -> bool {
+        // This is related closely related to to ::inherited_properties.
+        let registration = self.registration(name);
+        let inherits = registration.map_or(true, |r| r.inherits);
+        let parent_value = self.parent_properties.and_then(|ps| ps.get(name));
+
+        match (value, inherits) {
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Revert), _) => {
+                parent_value.is_some()
+            }
+
+            // An explicit 'inherit', or 'unset' for an inherited property (e.g.
+            // untyped custom properties or typed inherited properties, as it is
+            // then equivalent to 'inherit') means we can just use the inherited
+            // value.
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Inherit), true)
+            | (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Unset), true) => {
+                false
+            }
+
+            // inherited_properties did something that we will have to undo if
+            // we are supposed to inherit from the parent.
+            //
+            // Inherited properties are copied into result_properties by
+            // default. 'initial' means we need to remove the inherited value.
+            //
+            // Uninherited properties are removed from parent_properties before
+            // it is copied to produce result_properties. 'inherit' means we
+            // need to add the inherited value back.
+            //
+            // If both cases, if the parent had no value anyways, we don't need
+            // to do anything.
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Initial), true)
+            | (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Inherit), false) => {
+                parent_value.is_some()
+            }
+
+            // For an uninherited property, 'initial' or 'unset' mean that the
+            // property should be set to its initial value. But
+            // inherited_properties already removes uninherited property values
+            // from the map, so we don't need to do anything here.
+            (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Initial), false)
+            | (&CustomDeclarationValue::CSSWideKeyword(CSSWideKeyword::Unset), false) => {
+                false
+            }
+
+            (&CustomDeclarationValue::Value(ref unparsed_value), true) => {
+                parent_value.map_or(true, |v| v != unparsed_value)
+            }
+
+            (&CustomDeclarationValue::Value(ref unparsed_value), false) => {
+                if let Some(parent_value) = parent_value {
+                    return unparsed_value != parent_value
+                }
+                if let Some(&(ref _value, ref css)) = registration.and_then(|r| r.initial_value.as_ref()) {
+                    return unparsed_value.token_stream != *css
+                }
+                true
+            },
+        }
+    }
+
+    /// Returns a map of applicable custom properties, with early custom
+    /// properties fully resolved, but with late custom properties awaiting
+    /// resolution with |resolve_late|.
+    ///
+    /// If possible, we will just return the parent's custom properties map.
+    /// Otherwise (e.g. if there was a declaration that affected the style, or
+    /// if some declaration requires variable resolution), we will perform
+    /// custom property resolution here and wrap the resulting map in an arc.
+    ///
+    /// TODO Ideally |context| would not be an Option. it is only that way for
+    /// |PropertyDeclarationBlock::cascade_custom_properties|, where we are
+    /// using this function but aren't actually computing custom properties for
+    /// now.
+    ///
+    /// Returns |(resolved_properties, early_only, font_size_cyclical)|.
+    pub fn build_early(
+        mut self,
+        context: Option<&computed::Context>,
+        font_size_references: &[Name],
+    ) -> (Option<Arc<CustomPropertiesMap>>, bool, bool) {
+        // Get the CustomPropertiesMap to return. If we saw no declarations, we
+        // might even be able to return a clone of the Arc for our parent's
+        // properties. This will be determined by `inherited_properties`.
+        let mut custom_properties = match self.result_properties.take() {
+            Some(ps) => ps,
+            None => {
+                let parent_has_uninherited = self.parent_properties.map_or(false, |x| x.has_uninherited);
+                let inherited_properties = if !parent_has_uninherited {
+                    self.parent_properties.cloned()
+                } else {
+                    self.inherited_properties().map(Arc::new)
+                };
+                return (
+                    inherited_properties,
+                    /* early_only */ true,
+                    /* font_size_cyclical */ false,
+                );
+            }
+        };
+
+        // If we saw any declarations that might require variable resolution,
+        // do that now.
+        self.may_require_resolution |= !font_size_references.is_empty();
+        let (early_only, font_size_cyclical) = if !self.may_require_resolution {
+            (true, false)
+        } else {
+            let mut resolution_map = PVResolutionMap::new_early(
+                context,
+                self.registered_property_set,
+                self.environment,
+                font_size_references,
+                &mut custom_properties,
+            );
+            custom_properties::resolve_all(&mut resolution_map);
+            let early_only = resolution_map
+                .font_size_dependent
+                .map_or(true, |d| d.is_empty());
+            (early_only, resolution_map.font_size_cyclical)
+        };
+
+        (
+            Some(Arc::new(custom_properties)),
+            early_only,
+            font_size_cyclical,
+        )
+    }
+}
+
+/// Performs custom property resolution of 'late' custom properties, i.e. those
+/// which depend on the values of early properties, e.g. font-size.
+pub fn resolve_late<'a, 'b: 'a>(
+    context: &'a computed::Context<'b>,
+    registered_property_set: &'a RegisteredPropertySet,
+    environment: &'a CssEnvironment,
+
+    custom_properties: &'a mut CustomPropertiesMap,
+) {
+    let mut resolution_map = PVResolutionMap::new_late(
+        context,
+        registered_property_set,
+        environment,
+        custom_properties,
+    );
+    custom_properties::resolve_all(&mut resolution_map);
 }
