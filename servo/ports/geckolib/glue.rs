@@ -107,6 +107,7 @@ use style::properties::{ComputedValues, Importance, NonCustomPropertyId};
 use style::properties::{LonghandId, LonghandIdSet, PropertyDeclarationBlock, PropertyId};
 use style::properties::{PropertyDeclarationId, ShorthandId};
 use style::properties::{SourcePropertyDeclaration, StyleBuilder, UnparsedValue};
+use style::properties_and_values;
 use style::rule_cache::RuleCacheConditions;
 use style::rule_tree::{CascadeLevel, StrongRuleNode};
 use style::selector_parser::PseudoElementCascadeType;
@@ -5900,6 +5901,65 @@ pub extern "C" fn Servo_StyleSet_HasDocumentStateDependency(
     let data = PerDocumentStyleData::from_ffi(raw_data).borrow();
 
     data.stylist.has_document_state_dependency(state)
+}
+
+#[no_mangle]
+#[allow(unused_variables)]
+pub extern "C" fn Servo_StyleSet_RegisterProperty(
+    raw_data: &RawServoStyleSet,
+    raw_url_extra_data: *mut URLExtraData,
+    name: *const nsAString,
+    syntax: *const nsAString,
+    inherits: bool,
+    initial_value_was_passed: bool,
+    maybe_initial_value: *const nsAString,
+) -> u8 {
+    let data = PerDocumentStyleData::from_ffi(raw_data).borrow_mut();
+    let url_extra_data = unsafe { UrlExtraData::from_ptr_ref(&raw_url_extra_data) };
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.write();
+    let registered_property_set = locked.write_with(&mut guard);
+    let name = unsafe { (*name).to_string() };
+    let syntax = unsafe { (*syntax).to_string() };
+    let initial_value = if initial_value_was_passed {
+        Some(unsafe { (*maybe_initial_value).to_string() })
+    } else {
+        None
+    };
+
+    properties_and_values::register_property(
+        data.stylist.device(),
+        &mut *registered_property_set,
+        &ParserContext::new_for_cssom(
+            url_extra_data,
+            None,
+            ParsingMode::DEFAULT,
+            data.stylist.quirks_mode(),
+            None,
+            None,
+        ),
+        &name,
+        &syntax,
+        inherits,
+        initial_value.as_ref().map(|x| &**x),
+    ) as u8
+}
+
+#[no_mangle]
+#[allow(unused_variables)]
+pub extern "C" fn Servo_StyleSet_UnregisterProperty(
+    raw_data: &RawServoStyleSet,
+    name: *const nsAString,
+) -> u8 {
+    let data = PerDocumentStyleData::from_ffi(raw_data).borrow_mut();
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.write();
+    let registered_property_set = locked.write_with(&mut guard);
+    let name = unsafe { (*name).to_string() };
+
+    properties_and_values::unregister_property(&mut *registered_property_set, &name) as u8
 }
 
 #[no_mangle]

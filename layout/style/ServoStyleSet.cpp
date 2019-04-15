@@ -1235,6 +1235,24 @@ already_AddRefed<ComputedStyle> ServoStyleSet::ReparentComputedStyle(
       .Consume();
 }
 
+PropertyRegistrationResult ServoStyleSet::RegisterProperty(
+    const nsAString& aName, const nsAString& aSyntax, bool aInherits,
+    bool aInitialValueWasPassed, const nsAString& aMaybeInitialValue) {
+  RefPtr<URLExtraData> urlExtraData =
+      new URLExtraData(mDocument->GetDocBaseURI(), mDocument->GetDocBaseURI(),
+                       mDocument->NodePrincipal(), mozilla::net::RP_Unset);
+  return static_cast<PropertyRegistrationResult>(
+      Servo_StyleSet_RegisterProperty(
+          mRawSet.get(), urlExtraData, &aName, &aSyntax, aInherits,
+          aInitialValueWasPassed, &aMaybeInitialValue));
+}
+
+PropertyRegistrationResult ServoStyleSet::UnregisterProperty(
+    const nsAString& aName) {
+  return static_cast<PropertyRegistrationResult>(
+      Servo_StyleSet_UnregisterProperty(mRawSet.get(), &aName));
+}
+
 NS_IMPL_ISUPPORTS(UACacheReporter, nsIMemoryReporter)
 
 MOZ_DEFINE_MALLOC_SIZE_OF(ServoUACacheMallocSizeOf)

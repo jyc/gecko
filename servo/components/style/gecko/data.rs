@@ -10,9 +10,11 @@ use crate::gecko_bindings::bindings;
 use crate::gecko_bindings::structs::{self, RawServoStyleSet, ServoStyleSetSizes};
 use crate::gecko_bindings::structs::{StyleSheet as DomStyleSheet, StyleSheetInfo};
 use crate::gecko_bindings::sugar::ownership::{HasArcFFI, HasBoxFFI, HasFFI, HasSimpleFFI};
+use crate::global_style_data::GLOBAL_STYLE_DATA;
 use crate::invalidation::media_queries::{MediaListKey, ToMediaListKey};
 use crate::media_queries::{Device, MediaList};
 use crate::properties::ComputedValues;
+use crate::properties_and_values::RegisteredPropertySet;
 use crate::selector_parser::SnapshotMap;
 use crate::shared_lock::{Locked, SharedRwLockReadGuard, StylesheetGuards};
 use crate::stylesheets::{CssRule, Origin, StylesheetContents, StylesheetInDocument};
@@ -147,9 +149,12 @@ impl PerDocumentStyleData {
         let device = Device::new(document);
         let quirks_mode = device.document().mCompatMode;
 
-        PerDocumentStyleData(AtomicRefCell::new(PerDocumentStyleDataImpl {
-            stylist: Stylist::new(device, quirks_mode.into()),
-        }))
+        let mut stylist = Stylist::new(device, quirks_mode.into());
+        let registered_property_set: Arc<Locked<RegisteredPropertySet>> =
+            Arc::new(GLOBAL_STYLE_DATA.shared_lock.wrap(Default::default()));
+        stylist.set_registered_property_set(registered_property_set);
+
+        PerDocumentStyleData(AtomicRefCell::new(PerDocumentStyleDataImpl { stylist }))
     }
 
     /// Get an immutable reference to this style data.
