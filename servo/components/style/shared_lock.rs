@@ -321,6 +321,9 @@ pub struct StylesheetGuards<'a> {
 
     /// For user-agent-origin and user-origin stylesheets
     pub ua_or_user: &'a SharedRwLockReadGuard<'a>,
+
+    /// For the registered property set.
+    pub registered_property_set: &'a SharedRwLockReadGuard<'a>,
 }
 
 impl<'a> StylesheetGuards<'a> {
@@ -337,6 +340,7 @@ impl<'a> StylesheetGuards<'a> {
         StylesheetGuards {
             author: guard,
             ua_or_user: guard,
+            registered_property_set: guard,
         }
     }
 }

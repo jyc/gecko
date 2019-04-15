@@ -74,6 +74,15 @@ enum class OriginFlags : uint8_t {
 
 MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(OriginFlags)
 
+/* Should be kept in sync with style::properties_and_values::PropertyRegistrationResult on the
+ * Servo side. */
+enum class PropertyRegistrationResult : uint8_t {
+  Ok = 0,
+  SyntaxError,
+  InvalidModificationError,
+  NotFoundError,
+};
+
 /**
  * The set of style sheets that apply to a document, backed by a Servo
  * Stylist.  A ServoStyleSet contains StyleSheets.
@@ -428,7 +437,17 @@ class ServoStyleSet {
       ComputedStyle* aNewParentIgnoringFirstLine,
       ComputedStyle* aNewLayoutParent, dom::Element* aElement);
 
- private:
+  PropertyRegistrationResult
+  RegisterProperty(const nsAString& aName,
+                   const nsAString& aSyntax,
+                   bool aInherits,
+                   bool aInitialValueWasPassed,
+                   const nsAString& aMaybeInitialValue);
+
+  PropertyRegistrationResult
+  UnregisterProperty(const nsAString& aName);
+
+private:
   friend class AutoSetInServoTraversal;
   friend class AutoPrepareTraversal;
   friend class PostTraversalTask;
