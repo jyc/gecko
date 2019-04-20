@@ -35,7 +35,7 @@ use style::gecko::restyle_damage::GeckoRestyleDamage;
 use style::gecko::selector_parser::{NonTSPseudoClass, PseudoElement};
 use style::gecko::traversal::RecalcStyleOnly;
 use style::gecko::url::{self, CssUrlData};
-use style::gecko::wrapper::{GeckoElement, GeckoNode};
+use style::gecko::wrapper::{GeckoCSSProperty, GeckoElement, GeckoNode};
 use style::gecko_bindings::bindings;
 use style::gecko_bindings::bindings::nsACString;
 use style::gecko_bindings::bindings::nsAString;
@@ -48,7 +48,10 @@ use style::gecko_bindings::bindings::Gecko_GetOrCreateKeyframeAtStart;
 use style::gecko_bindings::bindings::Gecko_HaveSeenPtr;
 use style::gecko_bindings::bindings::Gecko_NewNoneTransform;
 use style::gecko_bindings::structs;
-use style::gecko_bindings::structs::{Element as RawGeckoElement, nsINode as RawGeckoNode};
+use style::gecko_bindings::structs::{
+    CSSProperty as RawGeckoCSSProperty, Element as RawGeckoElement,
+    nsINode as RawGeckoNode
+};
 use style::gecko_bindings::structs::{
     RawServoQuotes, RawServoStyleSet, RawServoAuthorStyles,
     RawServoCssUrlData, RawServoDeclarationBlock, RawServoMediaList,
@@ -3806,12 +3809,16 @@ pub unsafe extern "C" fn Servo_DeclarationBlock_GetCssText(
 #[no_mangle]
 pub extern "C" fn Servo_DeclarationBlock_SerializeOneValue(
     declarations: &RawServoDeclarationBlock,
-    property_id: nsCSSPropertyID,
+    property: &RawGeckoCSSProperty,
     buffer: *mut nsAString,
     computed_values: Option<&ComputedValues>,
     custom_properties: Option<&RawServoDeclarationBlock>,
 ) {
-    let property_id = get_property_id_from_nscsspropertyid!(property_id, ());
+    let nscsspropertyid = match GeckoCSSProperty::from_raw(property){
+        GeckoCSSProperty::Standard(nscsspropertyid) => nscsspropertyid,
+        _ => { unimplemented!("XXX jyc"); },
+    };
+    let property_id = get_property_id_from_nscsspropertyid!(nscsspropertyid, ());
 
     let global_style_data = &*GLOBAL_STYLE_DATA;
     let guard = global_style_data.shared_lock.read();

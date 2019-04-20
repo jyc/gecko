@@ -23,7 +23,7 @@ namespace mozilla {
  * CSS properties, and IsCustom() and AsCustom() do the same for custom
  * properties. Custom properties are encoded as atoms containing their names
  * without the leading '--', while standard properties are represented by
- * nsCSSProperty.
+ * nsCSSPropertyID.
  */
 class CSSProperty
 {
@@ -42,31 +42,31 @@ public:
 
   explicit CSSProperty(nsCSSPropertyID aProperty)
     : mState(State::Standard)
-    , mStandard(aProperty)
   {
+    mValue.mStandard = aProperty;
   }
 
   explicit CSSProperty(nsAtom* aProperty)
     : mState(State::Custom)
-    , mCustom(aProperty)
   {
-    mCustom->AddRef();
+    mValue.mCustom = aProperty;
+    mValue.mCustom->AddRef();
   }
 
   explicit CSSProperty(already_AddRefed<nsAtom> aProperty)
     : mState(State::Custom)
-    , mCustom(aProperty.take())
   {
+    mValue.mCustom = aProperty.take();
   }
 
   CSSProperty(const CSSProperty& aOther)
     : mState(aOther.mState)
   {
     if (mState == State::Custom) {
-      mCustom = aOther.mCustom;
-      mCustom->AddRef();
+      mValue.mCustom = aOther.mValue.mCustom;
+      mValue.mCustom->AddRef();
     } else {
-      mStandard = aOther.mStandard;
+      mValue.mStandard = aOther.mValue.mStandard;
     }
   }
 
@@ -86,16 +86,16 @@ public:
   CSSProperty& operator=(CSSProperty&& aOther)
   {
     if (mState == State::Custom) {
-      mCustom->Release();
+      mValue.mCustom->Release();
     }
     mState = aOther.mState;
     if (mState == State::Custom) {
-      mCustom = aOther.mCustom;
+      mValue.mCustom = aOther.mValue.mCustom;
       // Don't want double-frees.
-      aOther.mCustom = nullptr;
+      aOther.mValue.mCustom = nullptr;
       aOther.mState = State::Invalid;
     } else {
-      mStandard = aOther.mStandard;
+      mValue.mStandard = aOther.mValue.mStandard;
     }
     return *this;
   }
@@ -106,9 +106,9 @@ public:
                aOther.mState != State::Invalid);
     if (mState == State::Custom) {
       return aOther.mState == State::Custom &&
-             mCustom == aOther.mCustom;
+             mValue.mCustom == aOther.mValue.mCustom;
     } else {
-      return mStandard == aOther.mStandard;
+      return mValue.mStandard == aOther.mValue.mStandard;
     }
   }
 
@@ -121,7 +121,7 @@ public:
   {
     MOZ_ASSERT(mState != State::Invalid);
     return mState == State::Standard &&
-           mStandard == aOther;
+           mValue.mStandard == aOther;
   }
 
   bool operator!=(const nsCSSPropertyID& aOther) const
@@ -133,7 +133,7 @@ public:
   {
     MOZ_ASSERT(mState != State::Invalid);
     return mState == State::Custom &&
-           mCustom == aOther;
+           mValue.mCustom == aOther;
   }
 
   bool operator!=(nsAtom* aOther) const
@@ -144,7 +144,7 @@ public:
   ~CSSProperty()
   {
     if (mState == State::Custom) {
-      mCustom->Release();
+      mValue.mCustom->Release();
     }
   }
 
@@ -163,13 +163,13 @@ public:
   nsCSSPropertyID AsStandard() const
   {
     MOZ_ASSERT(mState == State::Standard);
-    return mStandard;
+    return mValue.mStandard;
   }
 
   nsAtom* AsCustom() const
   {
     MOZ_ASSERT(mState == State::Custom);
-    return mCustom;
+    return mValue.mCustom;
   }
 
   ///**
@@ -203,11 +203,11 @@ public:
         MOZ_ASSERT(false);
         break;
       case State::Standard:
-        aString = NS_ConvertASCIItoUTF16(nsCSSProps::GetStringValue(mStandard));
+        aString = NS_ConvertASCIItoUTF16(nsCSSProps::GetStringValue(mValue.mStandard));
         break;
       case State::Custom:
         nsAutoString name;
-        mCustom->ToString(name);
+        mValue.mCustom->ToString(name);
         aString.AppendLiteral("--");
         aString.Append(name);
         break;
@@ -224,7 +224,7 @@ public:
     if (mState == State::Custom) {
       return false;
     }
-    return nsCSSProps::IsShorthand(mStandard);
+    return nsCSSProps::IsShorthand(mValue.mStandard);
   }
 
   ///**
@@ -250,7 +250,7 @@ public:
    */
   bool HasFlags(nsCSSProps::Flags aFlags) const {
     return mState == State::Standard &&
-           nsCSSProps::PropHasFlags(mStandard, aFlags);
+           nsCSSProps::PropHasFlags(mValue.mStandard, aFlags);
   }
 
   /**
@@ -265,8 +265,8 @@ public:
                aOther.mState == State::Custom);
     nsString left;
     nsString right;
-    mCustom->ToString(left);
-    aOther.mCustom->ToString(right);
+    mValue.mCustom->ToString(left);
+    aOther.mValue.mCustom->ToString(right);
     return left < right;
   }
 
@@ -275,7 +275,7 @@ private:
   union {
     nsCSSPropertyID mStandard;
     nsAtom* mCustom;
-  };
+  } mValue;
 };
 
 } // namespace mozilla

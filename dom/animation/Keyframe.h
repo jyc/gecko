@@ -31,7 +31,7 @@ struct PropertyValuePair {
     MOZ_ASSERT(mServoDeclarationBlock, "Should be valid property value");
   }
 
-  nsCSSPropertyID mProperty;
+  CSSProperty mProperty;
 
   // The specified value when using the Servo backend.
   RefPtr<RawServoDeclarationBlock> mServoDeclarationBlock;

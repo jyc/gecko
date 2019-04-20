@@ -60,6 +60,7 @@ class nsMainThreadPtrHolder;
 namespace mozilla {
 
 class ComputedStyle;
+class CSSProperty;
 
 using Matrix4x4Components = float[16];
 using StyleMatrix4x4Components = Matrix4x4Components;
@@ -124,6 +125,8 @@ using StyleIterationCompositeOperation = dom::IterationCompositeOperation;
 
 using StyleMatrixTransformOperator =
     nsStyleTransformMatrix::MatrixTransformOperator;
+
+using StyleRawGeckoCSSProperty = mozilla::CSSProperty;
 
 #  define SERVO_ARC_TYPE(name_, type_) using Style##type_ = type_;
 #  include "mozilla/ServoArcTypeList.h"

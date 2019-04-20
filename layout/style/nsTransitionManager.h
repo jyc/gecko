@@ -9,6 +9,7 @@
 #ifndef nsTransitionManager_h_
 #define nsTransitionManager_h_
 
+#include "mozilla/CSSProperty.h"
 #include "mozilla/ComputedTiming.h"
 #include "mozilla/EffectCompositor.h"  // For EffectCompositor::CascadeLevel
 #include "mozilla/dom/Animation.h"
@@ -50,7 +51,7 @@ struct ElementPropertyTransition : public dom::KeyframeEffect {
     return this;
   }
 
-  nsCSSPropertyID TransitionProperty() const {
+  CSSProperty TransitionProperty() const {
     MOZ_ASSERT(mKeyframes.Length() == 2,
                "Transitions should have exactly two animation keyframes. "
                "Perhaps we are using an un-initialized transition?");

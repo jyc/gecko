@@ -1166,7 +1166,7 @@ void KeyframeEffect::GetKeyframes(JSContext*& aCx, nsTArray<JSObject*>& aResult,
       }
       if (propertyValue.mServoDeclarationBlock) {
         Servo_DeclarationBlock_SerializeOneValue(
-            propertyValue.mServoDeclarationBlock, propertyValue.mProperty,
+            propertyValue.mServoDeclarationBlock, &propertyValue.mProperty,
             &stringValue, computedStyle, customProperties);
       } else {
         RawServoAnimationValue* value =
