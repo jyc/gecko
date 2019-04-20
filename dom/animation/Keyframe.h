@@ -12,6 +12,7 @@
 #include "nsTArray.h"
 #include "mozilla/dom/BaseKeyframeTypesBinding.h"  // CompositeOperationOrAuto
 #include "mozilla/ComputedTimingFunction.h"
+#include "mozilla/CSSProperty.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/RefPtr.h"
 
@@ -22,9 +23,9 @@ namespace mozilla {
  * A property-value pair specified on a keyframe.
  */
 struct PropertyValuePair {
-  explicit PropertyValuePair(nsCSSPropertyID aProperty)
+  explicit PropertyValuePair(CSSProperty aProperty)
       : mProperty(aProperty) {}
-  PropertyValuePair(nsCSSPropertyID aProperty,
+  PropertyValuePair(CSSProperty aProperty,
                     RefPtr<RawServoDeclarationBlock>&& aValue)
       : mProperty(aProperty), mServoDeclarationBlock(std::move(aValue)) {
     MOZ_ASSERT(mServoDeclarationBlock, "Should be valid property value");
