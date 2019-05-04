@@ -19,6 +19,7 @@ use crate::media_queries::Device;
 #[cfg(feature = "gecko")]
 use crate::properties;
 use crate::properties::{ComputedValues, LonghandId, StyleBuilder};
+use crate::properties_and_values::RegisteredPropertySet;
 use crate::rule_cache::RuleCacheConditions;
 use crate::Atom;
 #[cfg(feature = "servo")]
@@ -175,6 +176,10 @@ pub struct Context<'a> {
     ///
     /// FIXME(emilio): Drop the refcell.
     pub rule_cache_conditions: RefCell<&'a mut RuleCacheConditions>,
+
+    /// The set of custom property registrations. Used for variable substitution
+    /// (custom properties can be registered with initial values).
+    pub registered_property_set: Option<&'a RegisteredPropertySet>,
 }
 
 impl<'a> Context<'a> {
@@ -198,6 +203,7 @@ impl<'a> Context<'a> {
             for_smil_animation: false,
             for_non_inherited_property: None,
             rule_cache_conditions: RefCell::new(&mut conditions),
+            registered_property_set: None,
         };
 
         f(&context)

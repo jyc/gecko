@@ -4979,6 +4979,7 @@ fn create_context_for_animation<'a>(
     parent_style: Option<&'a ComputedValues>,
     for_smil_animation: bool,
     rule_cache_conditions: &'a mut RuleCacheConditions,
+    registered_property_set: &'a style::properties_and_values::RegisteredPropertySet,
 ) -> Context<'a> {
     Context {
         is_root_element: false,
@@ -4990,6 +4991,7 @@ fn create_context_for_animation<'a>(
         for_smil_animation,
         for_non_inherited_property: None,
         rule_cache_conditions: RefCell::new(rule_cache_conditions),
+        registered_property_set: Some(registered_property_set),
     }
 }
 
@@ -5062,6 +5064,11 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
         .map(|d| d.styles.primary())
         .map(|x| &**x);
 
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.read();
+    let registered_property_set = locked.read_with(&mut guard);
+
     let mut conditions = Default::default();
     let mut context = create_context_for_animation(
         &data,
@@ -5070,6 +5077,7 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
         parent_style,
         /* for_smil_animation = */ false,
         &mut conditions,
+        registered_property_set,
     );
 
     let global_style_data = &*GLOBAL_STYLE_DATA;
@@ -5180,6 +5188,11 @@ pub extern "C" fn Servo_GetAnimationValues(
         .map(|d| d.styles.primary())
         .map(|x| &**x);
 
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.read();
+    let registered_property_set = locked.read_with(&mut guard);
+
     let mut conditions = Default::default();
     let mut context = create_context_for_animation(
         &data,
@@ -5188,6 +5201,7 @@ pub extern "C" fn Servo_GetAnimationValues(
         parent_style,
         /* for_smil_animation = */ true,
         &mut conditions,
+        registered_property_set,
     );
 
     let default_values = data.default_computed_values();
@@ -5225,6 +5239,11 @@ pub extern "C" fn Servo_AnimationValue_Compute(
         .map(|d| d.styles.primary())
         .map(|x| &**x);
 
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.read();
+    let registered_property_set = locked.read_with(&mut guard);
+
     let mut conditions = Default::default();
     let mut context = create_context_for_animation(
         &data,
@@ -5233,6 +5252,7 @@ pub extern "C" fn Servo_AnimationValue_Compute(
         parent_style,
         /* for_smil_animation = */ false,
         &mut conditions,
+        &registered_property_set,
     );
 
     let default_values = data.default_computed_values();
