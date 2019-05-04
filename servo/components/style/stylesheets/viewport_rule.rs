@@ -735,6 +735,7 @@ impl MaybeNew for ViewportConstraints {
             for_smil_animation: false,
             for_non_inherited_property: None,
             rule_cache_conditions: RefCell::new(&mut conditions),
+            registered_property_set: None,
         };
 
         // DEVICE-ADAPT § 9.3 Resolving 'extend-to-zoom'

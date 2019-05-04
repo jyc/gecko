@@ -279,6 +279,8 @@ where
         font_metrics_provider,
         quirks_mode,
         rule_cache_conditions: RefCell::new(rule_cache_conditions),
+        // XXX This is changed by a later patch in this series.
+        registered_property_set: None,
     };
 
     let using_cached_reset_properties = {
