@@ -59,7 +59,7 @@ struct AnimationPropertyDetails;
 }  // namespace dom
 
 struct AnimationProperty {
-  nsCSSPropertyID mProperty = eCSSProperty_UNKNOWN;
+  CSSProperty mProperty = CSSProperty(eCSSProperty_UNKNOWN);
 
   // If true, the propery is currently being animated on the compositor.
   //
@@ -188,8 +188,10 @@ class KeyframeEffect : public AnimationEffect {
   bool HasAnimationOfPropertySet(const nsCSSPropertyIDSet& aPropertySet) const;
 
   // GetEffectiveAnimationOfProperty returns AnimationProperty corresponding
-  // to a given CSS property if the effect includes the property and the
-  // property is not overridden by !important rules.
+  // to a given standard CSS property if the effect includes the property and
+  // the property is not overridden by !important rules. (Custom CSS properties
+  // are never animated on the compositor, and this function is intended to be
+  // used to query compositor-animatable properties).
   // Also EffectiveAnimationOfProperty returns true under the same condition.
   //
   // |aEffect| should be the EffectSet containing this KeyframeEffect since

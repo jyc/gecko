@@ -717,14 +717,14 @@ macro_rules! get_property_id_from_nscsspropertyid {
 #[no_mangle]
 pub extern "C" fn Servo_AnimationValue_Serialize(
     value: &RawServoAnimationValue,
-    property: nsCSSPropertyID,
+    property: &RawGeckoCSSProperty,
     buffer: *mut nsAString,
 ) {
     let uncomputed_value = AnimationValue::as_arc(&value).uncompute();
     let buffer = unsafe { buffer.as_mut().unwrap() };
     let rv = PropertyDeclarationBlock::with_one(uncomputed_value, Importance::Normal)
         .single_value_to_css(
-            &get_property_id_from_nscsspropertyid!(property, ()),
+            PropertyId::from_gecko(property),
             buffer,
             None,
             None, /* No extra custom properties */

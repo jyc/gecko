@@ -273,10 +273,10 @@ Size AnimationValue::GetScaleValue(const nsIFrame* aFrame) const {
   return nsStyleTransformMatrix::GetScaleValue(list, aFrame);
 }
 
-void AnimationValue::SerializeSpecifiedValue(nsCSSPropertyID aProperty,
+void AnimationValue::SerializeSpecifiedValue(const CSSProperty& aProperty,
                                              nsAString& aString) const {
   MOZ_ASSERT(mServo);
-  Servo_AnimationValue_Serialize(mServo, aProperty, &aString);
+  Servo_AnimationValue_Serialize(mServo, &aProperty, &aString);
 }
 
 bool AnimationValue::IsInterpolableWith(nsCSSPropertyID aProperty,

@@ -575,11 +575,15 @@ nsCSSPropertyIDSet EffectCompositor::GetOverriddenProperties(
     nsCSSPropertyIDSet propertiesToTrackAsSet;
     for (KeyframeEffect* effect : aEffectSet) {
       for (const AnimationProperty& property : effect->Properties()) {
-        if (nsCSSProps::PropHasFlags(property.mProperty,
-                                     CSSPropFlags::CanAnimateOnCompositor) &&
-            !propertiesToTrackAsSet.HasProperty(property.mProperty)) {
-          propertiesToTrackAsSet.AddProperty(property.mProperty);
-          propertiesToTrack.AppendElement(property.mProperty);
+        // Only standard properties can be animated on the compositor.
+        if (!property.mProperty.IsStandard()) {
+          continue;
+        }
+        nsCSSPropertyID propertyID = property.mProperty.AsStandard();
+        if (nsCSSProps::PropHasFlags(propertyID, CSSPropFlags::CanAnimateOnCompositor) &&
+            !propertiesToTrackAsSet.HasProperty(propertyID)) {
+          propertiesToTrackAsSet.AddProperty(propertyID);
+          propertiesToTrack.AppendElement(propertyID);
         }
       }
       // Skip iterating over the rest of the effects if we've already
@@ -651,16 +655,21 @@ void EffectCompositor::UpdateCascadeResults(EffectSet& aEffectSet,
     CascadeLevel cascadeLevel = effect->GetAnimation()->CascadeLevel();
 
     for (const AnimationProperty& prop : effect->Properties()) {
-      if (overriddenProperties.HasProperty(prop.mProperty)) {
-        propertiesWithImportantRules.AddProperty(prop.mProperty);
+      // Only standard properties can be composited.
+      if (!prop.mProperty.IsStandard()) {
+        continue;
+      }
+      nsCSSPropertyID propertyID = prop.mProperty.AsStandard();
+      if (overriddenProperties.HasProperty(propertyID)) {
+        propertiesWithImportantRules.AddProperty(propertyID);
       }
 
       switch (cascadeLevel) {
         case EffectCompositor::CascadeLevel::Animations:
-          propertiesForAnimationsLevel.AddProperty(prop.mProperty);
+          propertiesForAnimationsLevel.AddProperty(propertyID);
           break;
         case EffectCompositor::CascadeLevel::Transitions:
-          propertiesForTransitionsLevel.AddProperty(prop.mProperty);
+          propertiesForTransitionsLevel.AddProperty(propertyID);
           break;
       }
     }

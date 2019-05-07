@@ -18,7 +18,7 @@ use crate::properties::{
 };
 use crate::properties::longhands;
 use crate::properties::longhands::visibility::computed_value::T as Visibility;
-use crate::properties::LonghandId;
+use crate::properties::{LonghandId, PropertyId};
 use crate::properties_and_values::{CustomPropertiesMap, RegisteredPropertySet};
 use servo_arc::Arc;
 use smallvec::SmallVec;

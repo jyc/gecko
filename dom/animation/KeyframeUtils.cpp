@@ -664,7 +664,7 @@ static bool HasValidOffsets(const nsTArray<Keyframe>& aKeyframes) {
  *              a shorthand property.
  */
 static void MarkAsComputeValuesFailureKey(PropertyValuePair& aPair) {
-  MOZ_ASSERT(nsCSSProps::IsShorthand(aPair.mProperty),
+  MOZ_ASSERT(aPair.mProperty.IsShorthand(),
              "Only shorthand property values can be marked as failure values");
 
   aPair.mSimulateComputeValuesFailure = true;
@@ -1185,7 +1185,7 @@ static bool HasImplicitKeyframeValues(const nsTArray<Keyframe>& aKeyframes,
     double offsetToUse = frame.mOffset ? frame.mOffset.value() : computedOffset;
 
     for (const PropertyValuePair& pair : frame.mPropertyValues) {
-      if (nsCSSProps::IsShorthand(pair.mProperty)) {
+      if (pair.mProperty.IsShorthand()) {
         MOZ_ASSERT(pair.mServoDeclarationBlock);
         CSSPROPS_FOR_SHORTHAND_SUBPROPERTIES(prop, pair.mProperty,
                                              CSSEnabledState::ForAllContent) {

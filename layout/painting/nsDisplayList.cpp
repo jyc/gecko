@@ -683,7 +683,7 @@ GroupAnimationsByProperty(const nsTArray<RefPtr<dom::Animation>>& aAnimations,
 static void AddAnimationsForProperty(
     nsIFrame* aFrame, const EffectSet* aEffects,
     const nsTArray<RefPtr<dom::Animation>>& aCompositorAnimations,
-    const Maybe<TransformData>& aData, nsCSSPropertyID aProperty,
+    const Maybe<TransformData>& aData, CSSProperty aProperty,
     Send aSendFlag, AnimationInfo& aAnimationInfo) {
   // Add from first to last (since last overrides)
   for (dom::Animation* anim : aCompositorAnimations) {

@@ -85,7 +85,7 @@ struct AnimationValue {
   mozilla::gfx::Size GetScaleValue(const nsIFrame* aFrame) const;
 
   // Uncompute this AnimationValue and then serialize it.
-  void SerializeSpecifiedValue(nsCSSPropertyID aProperty,
+  void SerializeSpecifiedValue(const CSSProperty& aProperty,
                                nsAString& aString) const;
 
   // Check if |*this| and |aToValue| can be interpolated.

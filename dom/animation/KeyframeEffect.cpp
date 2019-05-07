@@ -262,14 +262,18 @@ const AnimationProperty* KeyframeEffect::GetEffectiveAnimationOfProperty(
              EffectSet::GetEffectSet(mTarget->mElement, mTarget->mPseudoType));
 
   for (const AnimationProperty& property : mProperties) {
-    if (aProperty != property.mProperty) {
+    if (!property.mProperty.IsStandard()) {
+      continue;
+    }
+    nsCSSPropertyID propertyID = property.mProperty.AsStandard();
+    if (aProperty != propertyID) {
       continue;
     }
 
     const AnimationProperty* result = nullptr;
     // Only include the property if it is not overridden by !important rules in
     // the transitions level.
-    if (IsEffectiveProperty(aEffects, property.mProperty)) {
+    if (IsEffectiveProperty(aEffects, propertyID)) {
       result = &property;
     }
     return result;
@@ -295,14 +299,18 @@ bool KeyframeEffect::HasEffectiveAnimationOfPropertySet(
   bool result = false;
 
   for (const AnimationProperty& property : mProperties) {
-    if (!aPropertySet.HasProperty(property.mProperty)) {
+    if (property.mProperty.IsStandard()) {
+      continue;
+    }
+    nsCSSPropertyID propertyID = property.mProperty.AsStandard();
+    if (!aPropertySet.HasProperty(propertyID)) {
       continue;
     }
 
-    if (IsEffectiveProperty(aEffectSet, property.mProperty)) {
+    if (IsEffectiveProperty(aEffectSet, propertyID)) {
       result = true;
     } else if (nsCSSPropertyIDSet::TransformLikeProperties().HasProperty(
-                   property.mProperty)) {
+                   propertyID)) {
       return false;
     }
   }
@@ -324,20 +332,24 @@ nsCSSPropertyIDSet KeyframeEffect::GetPropertiesForCompositor(
   static constexpr nsCSSPropertyIDSet compositorAnimatables =
       nsCSSPropertyIDSet::CompositorAnimatables();
   for (const AnimationProperty& property : mProperties) {
-    if (!compositorAnimatables.HasProperty(property.mProperty)) {
+    if (!property.mProperty.IsStandard()) {
+      continue;
+    }
+    nsCSSPropertyID propertyID = property.mProperty.AsStandard();
+    if (!compositorAnimatables.HasProperty(propertyID)) {
       continue;
     }
 
     AnimationPerformanceWarning::Type warning;
     KeyframeEffect::MatchForCompositor matchResult = IsMatchForCompositor(
-        nsCSSPropertyIDSet{property.mProperty}, aFrame, aEffects, warning);
+        nsCSSPropertyIDSet{propertyID}, aFrame, aEffects, warning);
     if (matchResult ==
             KeyframeEffect::MatchForCompositor::NoAndBlockThisProperty ||
         matchResult == KeyframeEffect::MatchForCompositor::No) {
       continue;
     }
 
-    properties.AddProperty(property.mProperty);
+    properties.AddProperty(propertyID);
   }
   return properties;
 }
@@ -345,7 +357,11 @@ nsCSSPropertyIDSet KeyframeEffect::GetPropertiesForCompositor(
 bool KeyframeEffect::HasAnimationOfPropertySet(
     const nsCSSPropertyIDSet& aPropertySet) const {
   for (const AnimationProperty& property : mProperties) {
-    if (aPropertySet.HasProperty(property.mProperty)) {
+    if (!property.mProperty.IsStandard()) {
+      continue;
+    }
+    nsCSSPropertyID propertyID = property.mProperty.AsStandard();
+    if (aPropertySet.HasProperty(propertyID)) {
       return true;
     }
   }
@@ -401,8 +417,12 @@ void KeyframeEffect::UpdateProperties(const ComputedStyle* aStyle) {
   nsCSSPropertyIDSet runningOnCompositorProperties;
 
   for (const AnimationProperty& property : mProperties) {
+    if (!property.mProperty.IsStandard()) {
+      // Custom properties don't run on the compositor.
+      continue;
+    }
     if (property.mIsRunningOnCompositor) {
-      runningOnCompositorProperties.AddProperty(property.mProperty);
+      runningOnCompositorProperties.AddProperty(property.mProperty.AsStandard());
     }
   }
 
@@ -410,8 +430,11 @@ void KeyframeEffect::UpdateProperties(const ComputedStyle* aStyle) {
   UpdateEffectSet();
 
   for (AnimationProperty& property : mProperties) {
+    if (!property.mProperty.IsStandard()) {
+      property.mIsRunningOnCompositor = false;
+    }
     property.mIsRunningOnCompositor =
-        runningOnCompositorProperties.HasProperty(property.mProperty);
+        runningOnCompositorProperties.HasProperty(property.mProperty.AsStandard());
   }
 
   CalculateCumulativeChangeHint(aStyle);
@@ -1173,7 +1196,7 @@ void KeyframeEffect::GetKeyframes(JSContext*& aCx, nsTArray<JSObject*>& aResult,
             mBaseValues.GetWeak(propertyValue.mProperty);
 
         if (value) {
-          Servo_AnimationValue_Serialize(value, propertyValue.mProperty,
+          Servo_AnimationValue_Serialize(value, &propertyValue.mProperty,
                                          &stringValue);
         }
       }

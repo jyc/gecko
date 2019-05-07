@@ -1825,7 +1825,7 @@ impl<'a> PropertyDeclarationId<'a> {
 
 /// Servo's representation of a CSS property, that is, either a longhand, a
 /// shorthand, or a custom property.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub enum PropertyId {
     /// A longhand property.
     Longhand(LonghandId),
@@ -2100,6 +2100,14 @@ impl PropertyId {
     /// Whether this is a custom property.
     pub fn is_custom(&self) -> bool {
         matches!(*self, PropertyId::Custom(..))
+    }
+
+    /// Whether this property is a logical longhand.
+    pub fn is_logical(&self) -> bool {
+        match *self {
+            PropertyId::Longhand(longhand) => longhand.is_logical(),
+            _ => false,
+        }
     }
 }
 
