@@ -12,6 +12,7 @@ use crate::properties::{CSSWideKeyword, CustomDeclaration, CustomDeclarationValu
 use crate::properties::longhands::transform;
 use crate::selector_map::PrecomputedHashSet;
 use crate::stylesheets::{Origin, PerOrigin};
+use crate::values::animated::{Animate, Procedure};
 use crate::Atom;
 use cssparser::{BasicParseError, BasicParseErrorKind, Parser, ParserInput, Token};
 use parser::{Parse, ParserContext};
@@ -1166,6 +1167,13 @@ impl OneOrMoreSeparated for ComputedValueItem {
     type S = Space;
 }
 
+impl Animate for ComputedValueItem {
+    /// Animate a value towards another one, given an animation procedure.
+    fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
+        unimplemented!()
+    }
+}
+
 /// A computed typed value.
 #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss, ToShmem)]
 #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
@@ -1180,6 +1188,13 @@ impl ComputedValue {
     /// Returns the CSS serialization of this computed value.
     pub fn to_token_stream(&self) -> TokenStream {
         TokenStream::from_css(self)
+    }
+}
+
+impl Animate for ComputedValue {
+    /// Animate a value towards another one, given an animation procedure.
+    fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
+        unimplemented!()
     }
 }
 

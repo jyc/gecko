@@ -68,6 +68,7 @@ impl PropertyCategory {
 ///
 /// [property-order] https://drafts.csswg.org/web-animations/#calculating-computed-keyframes
 pub fn compare_property_priority(a: &PropertyId, b: &PropertyId) -> cmp::Ordering {
+    // XXX(jyc) Does this need to be updated?
     let a_category = PropertyCategory::of(a);
     let b_category = PropertyCategory::of(b);
 

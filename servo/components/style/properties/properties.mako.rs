@@ -32,6 +32,7 @@ use crate::media_queries::Device;
 use crate::parser::ParserContext;
 use crate::properties::longhands::system_font::SystemFont;
 use crate::properties_and_values::CustomPropertiesMap;
+use crate::selector_map::PrecomputedHashSet;
 use crate::selector_parser::PseudoElement;
 use selectors::parser::SelectorParseErrorKind;
 #[cfg(feature = "servo")] use servo_config::prefs;
@@ -48,6 +49,9 @@ use crate::Zero;
 use self::computed_value_flags::*;
 use crate::str::{CssString, CssStringBorrow, CssStringWriter};
 use std::cell::Cell;
+#[cfg(feature = "gecko")]
+use crate::gecko_bindings::structs::{CSSProperty as RawGeckoCSSProperty};
+#[cfg(feature = "gecko")] use crate::Atom;
 
 pub use self::declaration_block::*;
 pub use self::cascade::*;
@@ -892,6 +896,109 @@ impl LonghandIdSet {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.storage.iter().all(|c| *c == 0)
+    }
+}
+
+/// TODO
+pub struct AnimatableIdSet {
+    longhands: LonghandIdSet,
+    custom: PrecomputedHashSet<crate::custom_properties::Name>,
+}
+
+impl AnimatableIdSet {
+    // XXX(jyc) deleted some methods here that didn't seem relevant because
+    // commenting them out made the preprocessor mad
+
+    /// Returns whether this set contains at least every property that `other`
+    /// also contains.
+    pub fn contains_all(&self, other: &Self) -> bool {
+        self.longhands.contains_all(&other.longhands) && self.custom.is_superset(&other.custom)
+    }
+
+    /// Returns whether this set contains any property that `other` also contains.
+    pub fn contains_any(&self, other: &Self) -> bool {
+        self.longhands.contains_any(&other.longhands) || !self.custom.is_disjoint(&other.custom)
+    }
+
+    /// Remove all the given properties from the set.
+    #[inline]
+    pub fn remove_all(&mut self, other: &Self) {
+        self.longhands.remove_all(&other.longhands);
+        for custom in other.custom.iter() {
+            self.custom.remove(custom);
+        }
+    }
+
+    /// Create an empty set
+    #[inline]
+    pub fn new() -> AnimatableIdSet {
+        AnimatableIdSet {
+            longhands: LonghandIdSet::new(),
+            custom: Default::default(),
+        }
+    }
+
+    /// Return whether the given property is in the set
+    #[inline]
+    pub fn contains(&self, id: PropertyId) -> bool {
+        match id {
+            PropertyId::Longhand(longhand) => self.longhands.contains(longhand),
+            PropertyId::Custom(ref custom) => self.custom.contains(custom),
+            _ => panic!("expected animatable property ID"),
+        }
+    }
+
+    ///// Return whether this set contains any reset longhand.
+    //#[inline]
+    //pub fn contains_any_reset(&self) -> bool {
+    //    self.contains_any(Self::reset())
+    //}
+
+    /// Add the given property to the set
+    #[inline]
+    pub fn insert(&mut self, id: PropertyId) {
+        match id {
+            PropertyId::Longhand(longhand) => {
+                self.longhands.insert(longhand);
+            },
+            PropertyId::Custom(ref custom) => {
+                self.custom.insert(custom.clone());
+            },
+            _ => {
+                panic!("expected animatable property ID");
+            },
+        }
+    }
+
+    /// Remove the given property from the set
+    #[inline]
+    pub fn remove(&mut self, id: PropertyId) {
+        match id {
+            PropertyId::Longhand(longhand) => {
+                self.longhands.remove(longhand);
+            },
+            PropertyId::Custom(ref custom) => {
+                self.custom.remove(custom);
+            },
+            _ => {
+                // XXX(jyc) Should we create a new type, AnimatableId, which is
+                // longhands and custom properties?
+                panic!("expected animatable property ID");
+            },
+        }
+    }
+
+    /// Clear all bits
+    #[inline]
+    pub fn clear(&mut self) {
+        self.longhands.clear();
+        self.custom.clear();
+    }
+
+    /// Returns whether the set is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.longhands.is_empty() && self.custom.is_empty()
     }
 }
 
@@ -1951,6 +2058,48 @@ impl PropertyId {
             id.collect_property_completion_keywords(f);
         }
         CSSWideKeyword::collect_completion_keywords(f);
+    }
+
+    /// Converts a RawGeckoCSSProperty (a mozilla::CSSProperty) into a
+    /// PropertyId. Panics if the RawGeckoCSSProperty is in an invalid state.
+    #[cfg(feature = "gecko")]
+    pub fn from_gecko(raw: &RawGeckoCSSProperty) -> Self {
+        match raw.mState {
+            structs::CSSProperty_State_Standard => {
+                let nscsspropertyid = unsafe { *raw.mValue.mStandard.as_ref() };
+                PropertyId::from_nscsspropertyid(nscsspropertyid).expect("mozilla::CSSProperty.IsStandard() but AsStandard() is not a valid non-custom nsCSSPropertyID")
+            },
+            structs::CSSProperty_State_Custom => {
+                let atom = unsafe { Atom::from_raw(*raw.mValue.mCustom.as_ref()) };
+                PropertyId::Custom(atom)
+            },
+            structs::CSSProperty_State_Invalid | _ => {
+                panic!("mozilla::CSSProperty is in an invalid state");
+            },
+        }
+    }
+
+    /// Returns the equivalent RawGeckoCSSProperty (a mozilla::CSSProperty).
+    #[cfg(feature = "gecko")]
+    pub fn into_gecko(self) -> RawGeckoCSSProperty {
+        let mut result: RawGeckoCSSProperty = unsafe { std::mem::zeroed() };
+        if let PropertyId::Custom(name) = self {
+            result.mState = structs::CSSProperty_State_Custom;
+            // XXX(jyc) Does this work? It should, because mCustom is just a
+            // pointer.
+            unsafe { *result.mValue.mCustom.as_mut() = name.into_addrefed(); }
+        } else {
+            // XXX(jyc) Is resolving aliases appropriate here?
+            let nscsspropertyid = self.to_nscsspropertyid_resolving_aliases();
+            result.mState = structs::CSSProperty_State_Standard;
+            unsafe { *result.mValue.mStandard.as_mut() = nscsspropertyid; }
+        }
+        result
+    }
+
+    /// Whether this is a custom property.
+    pub fn is_custom(&self) -> bool {
+        matches!(*self, PropertyId::Custom(..))
     }
 }
 

@@ -9,6 +9,7 @@
 #ifndef mozilla_StyleAnimationValue_h_
 #define mozilla_StyleAnimationValue_h_
 
+#include "mozilla/CSSProperty.h"
 #include "mozilla/gfx/MatrixFwd.h"
 #include "mozilla/gfx/Point.h"
 #include "mozilla/ServoBindingTypes.h"
@@ -117,7 +118,7 @@ struct AnimationValue {
 };
 
 struct PropertyStyleAnimationValuePair {
-  nsCSSPropertyID mProperty;
+  CSSProperty mProperty;
   AnimationValue mValue;
 };
 }  // namespace mozilla

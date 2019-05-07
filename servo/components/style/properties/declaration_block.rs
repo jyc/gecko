@@ -14,7 +14,7 @@ use crate::error_reporting::{ParseErrorReporter, ContextualParseError};
 use itertools::Itertools;
 use crate::parser::ParserContext;
 use crate::properties::animated_properties::{AnimationValue, AnimationValueMap};
-use crate::properties_and_values::{CustomPropertiesMap, CustomPropertiesBuilder};
+use crate::properties_and_values::{CustomPropertiesMap, CustomPropertiesBuilder, RegisteredPropertySet};
 use crate::shared_lock::Locked;
 use smallbitvec::{self, SmallBitVec};
 use smallvec::SmallVec;
@@ -146,6 +146,7 @@ pub struct AnimationValueIterator<'a, 'cx, 'cx_a:'cx> {
     iter: DeclarationImportanceIterator<'a>,
     context: &'cx mut Context<'cx_a>,
     default_values: &'a ComputedValues,
+    registered_property_set: &'a RegisteredPropertySet,
     /// Custom properties in a keyframe if exists.
     extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
 }
@@ -155,12 +156,14 @@ impl<'a, 'cx, 'cx_a:'cx> AnimationValueIterator<'a, 'cx, 'cx_a> {
         declarations: &'a PropertyDeclarationBlock,
         context: &'cx mut Context<'cx_a>,
         default_values: &'a ComputedValues,
+        registered_property_set: &'a RegisteredPropertySet,
         extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
     ) -> AnimationValueIterator<'a, 'cx, 'cx_a> {
         AnimationValueIterator {
             iter: declarations.declaration_importance_iter(),
             context,
             default_values,
+            registered_property_set,
             extra_custom_properties,
         }
     }
@@ -180,6 +183,7 @@ impl<'a, 'cx, 'cx_a:'cx> Iterator for AnimationValueIterator<'a, 'cx, 'cx_a> {
             let animation = AnimationValue::from_declaration(
                 decl,
                 &mut self.context,
+                self.registered_property_set,
                 self.extra_custom_properties,
                 self.default_values,
             );
@@ -261,9 +265,16 @@ impl PropertyDeclarationBlock {
         &'a self,
         context: &'cx mut Context<'cx_a>,
         default_values: &'a ComputedValues,
+        registered_property_set: &'a RegisteredPropertySet,
         extra_custom_properties: Option<&'a Arc<CustomPropertiesMap>>,
     ) -> AnimationValueIterator<'a, 'cx, 'cx_a> {
-        AnimationValueIterator::new(self, context, default_values, extra_custom_properties)
+        AnimationValueIterator::new(
+            self,
+            context,
+            default_values,
+            registered_property_set,
+            extra_custom_properties,
+        )
     }
 
     /// Returns whether this block contains any declaration with `!important`.

@@ -35,7 +35,7 @@ use style::gecko::restyle_damage::GeckoRestyleDamage;
 use style::gecko::selector_parser::{NonTSPseudoClass, PseudoElement};
 use style::gecko::traversal::RecalcStyleOnly;
 use style::gecko::url::{self, CssUrlData};
-use style::gecko::wrapper::{GeckoCSSProperty, GeckoElement, GeckoNode};
+use style::gecko::wrapper::{GeckoElement, GeckoNode};
 use style::gecko_bindings::bindings;
 use style::gecko_bindings::bindings::nsACString;
 use style::gecko_bindings::bindings::nsAString;
@@ -50,7 +50,7 @@ use style::gecko_bindings::bindings::Gecko_NewNoneTransform;
 use style::gecko_bindings::structs;
 use style::gecko_bindings::structs::{
     CSSProperty as RawGeckoCSSProperty, Element as RawGeckoElement,
-    nsINode as RawGeckoNode
+    nsINode as RawGeckoNode,
 };
 use style::gecko_bindings::structs::{
     RawServoQuotes, RawServoStyleSet, RawServoAuthorStyles,
@@ -110,6 +110,7 @@ use style::parser::{self, Parse, ParserContext};
 use style::properties::animated_properties::AnimationValue;
 use style::properties::{parse_one_declaration_into, parse_style_attribute};
 use style::properties::{ComputedValues, Importance, NonCustomPropertyId};
+use style::properties::AnimatableIdSet;
 use style::properties::{LonghandId, LonghandIdSet, PropertyDeclarationBlock, PropertyId};
 use style::properties::{PropertyDeclarationId, ShorthandId};
 use style::properties::{SourcePropertyDeclaration, StyleBuilder, UnparsedValue};
@@ -3814,12 +3815,7 @@ pub extern "C" fn Servo_DeclarationBlock_SerializeOneValue(
     computed_values: Option<&ComputedValues>,
     custom_properties: Option<&RawServoDeclarationBlock>,
 ) {
-    let nscsspropertyid = match GeckoCSSProperty::from_raw(property){
-        GeckoCSSProperty::Standard(nscsspropertyid) => nscsspropertyid,
-        _ => { unimplemented!("XXX jyc"); },
-    };
-    let property_id = get_property_id_from_nscsspropertyid!(nscsspropertyid, ());
-
+    let property_id = PropertyId::from_gecko(property);
     let global_style_data = &*GLOBAL_STYLE_DATA;
     let guard = global_style_data.shared_lock.read();
     let decls = Locked::<PropertyDeclarationBlock>::as_arc(&declarations).read_with(&guard);
@@ -4969,8 +4965,7 @@ pub extern "C" fn Servo_ReparentStyle(
 
 #[cfg(feature = "gecko_debug")]
 fn simulate_compute_values_failure(property: &PropertyValuePair) -> bool {
-    let p = property.mProperty;
-    let id = get_property_id_from_nscsspropertyid!(p, false);
+    let id = PropertyId::from_gecko(&property.mProperty);
     id.as_shorthand().is_ok() && property.mSimulateComputeValuesFailure
 }
 
@@ -5024,9 +5019,9 @@ impl<'a> PrioritizedPropertyIter<'a> {
             .iter()
             .enumerate()
             .map(|(index, pair)| {
-                let property = PropertyId::from_nscsspropertyid(pair.mProperty)
-                    .unwrap_or(PropertyId::Shorthand(ShorthandId::All));
-
+                let property = PropertyId::from_gecko(&pair.mProperty);
+                // XXX(jyc) Used to do this is if this wasn't a LonghandId.
+                // .unwrap_or(PropertyId::Shorthand(ShorthandId::All));
                 PropertyAndIndex { property, index }
             })
             .collect();
@@ -5062,6 +5057,10 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
 ) {
     let data = PerDocumentStyleData::from_ffi(raw_data).borrow();
     let metrics = get_metrics_provider_for_product();
+    let locked = data.stylist.registered_property_set();
+    let global_style_data = &*GLOBAL_STYLE_DATA;
+    let mut guard = global_style_data.shared_lock.write();
+    let registered_property_set = locked.read_with(&mut guard);
 
     let element = GeckoElement(element);
     let parent_element = element.inheritance_parent();
@@ -5096,7 +5095,7 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
         let mut custom_properties = None;
         for property in keyframe.mPropertyValues.iter() {
             // Find the block for custom properties first.
-            if property.mProperty == nsCSSPropertyID::eCSSPropertyExtra_variable {
+            if PropertyId::from_gecko(&property.mProperty).is_custom() {
                 raw_custom_properties_block =
                     unsafe { &*property.mServoDeclarationBlock.mRawPtr.clone() };
                 let guard =
@@ -5110,7 +5109,7 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
 
         let ref mut animation_values = computed_keyframes[index];
 
-        let mut seen = LonghandIdSet::new();
+        let mut seen = AnimatableIdSet::new();
 
         let mut property_index = 0;
         for property in PrioritizedPropertyIter::new(&keyframe.mPropertyValues) {
@@ -5119,9 +5118,10 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
             }
 
             let mut maybe_append_animation_value =
-                |property: LonghandId, value: Option<AnimationValue>| {
-                    debug_assert!(!property.is_logical());
-                    debug_assert!(property.is_animatable());
+                |property: PropertyId, value: Option<AnimationValue>| {
+                    debug_assert!(!property.as_longhand().map_or(false, |p| p.is_logical()));
+                    // XXX(jyc) Replace.
+                    //debug_assert!(property.is_animatable());
 
                     // 'display' is only animatable from SMIL
                     if property == LonghandId::Display {
@@ -5135,7 +5135,7 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
 
                     // This is safe since we immediately write to the uninitialized values.
                     unsafe { animation_values.set_len((property_index + 1) as u32) };
-                    animation_values[property_index].mProperty = property.to_nscsspropertyid();
+                    animation_values[property_index].mProperty = property.into_gecko();
                     match value {
                         Some(v) => {
                             animation_values[property_index]
@@ -5152,10 +5152,8 @@ pub extern "C" fn Servo_GetComputedKeyframeValues(
                 };
 
             if property.mServoDeclarationBlock.mRawPtr.is_null() {
-                let property = LonghandId::from_nscsspropertyid(property.mProperty);
-                if let Ok(prop) = property {
-                    maybe_append_animation_value(prop, None);
-                }
+                let prop = PropertyId::from_gecko(&property.mProperty);
+                maybe_append_animation_value(prop, None);
                 continue;
             }
 

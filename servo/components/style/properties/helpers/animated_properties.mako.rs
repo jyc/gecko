@@ -13,11 +13,13 @@
 #[cfg(feature = "gecko")] use crate::gecko_bindings::structs::nsCSSPropertyID;
 #[cfg(feature = "gecko")] use crate::gecko_bindings::sugar::ownership::{HasFFI, HasSimpleFFI};
 use itertools::{EitherOrBoth, Itertools};
-use crate::properties::{CSSWideKeyword, PropertyDeclaration};
+use crate::properties::{
+    CSSWideKeyword, CustomDeclaration, CustomDeclarationValue, PropertyDeclaration,
+};
 use crate::properties::longhands;
 use crate::properties::longhands::visibility::computed_value::T as Visibility;
 use crate::properties::LonghandId;
-use crate::properties_and_values::CustomPropertiesMap;
+use crate::properties_and_values::{CustomPropertiesMap, RegisteredPropertySet};
 use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::ptr;
@@ -221,6 +223,8 @@ pub enum AnimationValue {
     ${prop.camel_case}(Void),
     % endif
     % endfor
+    /// A registered custom property.
+    Custom(crate::custom_properties::Name, crate::properties_and_values::ComputedValue),
 }
 
 <%
@@ -292,6 +296,9 @@ impl Clone for AnimationValue {
                 % endif
             }
             % endfor
+            AnimationValue::Custom(ref name, ref value) => {
+                AnimationValue::Custom(name.clone(), value.clone())
+            }
             _ => unsafe { debug_unreachable!() }
         }
     }
@@ -320,26 +327,44 @@ impl PartialEq for AnimationValue {
                 ${" |\n".join("{}(void)".format(prop.camel_case) for prop in unanimated)} => {
                     void::unreachable(void)
                 }
+                AnimationValue::Custom(ref name, ref value) => {
+                    if let AnimationValue::Custom(ref other_name, ref other_value) = *other {
+                        name == other_name && value == other_value
+                    } else {
+                        false
+                    }
+                }
             }
         }
     }
 }
 
 impl AnimationValue {
-    /// Returns the longhand id this animated value corresponds to.
+    /// Returns the property id this animated value corresponds to.
     #[inline]
-    pub fn id(&self) -> LonghandId {
-        let id = unsafe { *(self as *const _ as *const LonghandId) };
-        debug_assert_eq!(id, match *self {
+    pub fn id(&self) -> PropertyId {
+        //let id = unsafe { *(self as *const _ as *const LonghandId) };
+        //debug_assert_eq!(id, match *self {
+        //    % for prop in data.longhands:
+        //    % if prop.animatable and not prop.logical:
+        //    AnimationValue::${prop.camel_case}(..) => PropertyId::Longhand(LonghandId::${prop.camel_case}),
+        //    % else:
+        //    AnimationValue::${prop.camel_case}(void) => void::unreachable(void),
+        //    % endif
+        //    % endfor
+        //    AnimationValue::Custom(ref name, _) => PropertyId::Custom(name.clone()),
+        //});
+        //id
+        match *self {
             % for prop in data.longhands:
             % if prop.animatable and not prop.logical:
-            AnimationValue::${prop.camel_case}(..) => LonghandId::${prop.camel_case},
+            AnimationValue::${prop.camel_case}(..) => PropertyId::Longhand(LonghandId::${prop.camel_case}),
             % else:
             AnimationValue::${prop.camel_case}(void) => void::unreachable(void),
             % endif
             % endfor
-        });
-        id
+            AnimationValue::Custom(ref name, _) => PropertyId::Custom(name.clone()),
+        }
     }
 
     /// "Uncompute" this animation value in order to be used inside the CSS
@@ -382,6 +407,13 @@ impl AnimationValue {
             ${" |\n".join("{}(void)".format(prop.camel_case) for prop in unanimated)} => {
                 void::unreachable(void)
             }
+            AnimationValue::Custom(ref name, ref value) => {
+                PropertyDeclaration::Custom(CustomDeclaration {
+                    name: name.clone(),
+                    // XXX(jyc) Seems not good that we create an Arc here.
+                    value: CustomDeclarationValue::Value(Arc::new(value.into())),
+                })
+            }
         }
     }
 
@@ -389,6 +421,7 @@ impl AnimationValue {
     pub fn from_declaration(
         decl: &PropertyDeclaration,
         context: &mut Context,
+        registered_property_set: &RegisteredPropertySet,
         extra_custom_properties: Option<<&Arc<CustomPropertiesMap>>,
         initial: &ComputedValues
     ) -> Option<Self> {
@@ -528,9 +561,17 @@ impl AnimationValue {
                 return AnimationValue::from_declaration(
                     &substituted,
                     context,
+                    registered_property_set,
                     extra_custom_properties,
                     initial,
                 )
+            },
+            PropertyDeclaration::Custom(CustomDeclaration { ref name, ref value }) => {
+                let registration = match registered_property_set.get(name) {
+                    Some(registration) => registration,
+                    None => { return None; },
+                };
+                unimplemented!("have to compute value and create AnimationValue");
             },
             _ => return None // non animatable properties will get included because of shorthands. ignore.
         };
@@ -607,6 +648,16 @@ impl Animate for AnimationValue {
                 % endfor
                 ${" |\n".join("{}(void)".format(prop.camel_case) for prop in unanimated)} => {
                     void::unreachable(void)
+                }
+                AnimationValue::Custom(ref name, ref value) => {
+                    if let AnimationValue::Custom(ref other_name, ref other_value) = other {
+                        if name != other_name {
+                            panic!("AnimationValue::animate called on a custom and non-custom value");
+                        }
+                        AnimationValue::Custom(name.clone(), value.animate(other_value, procedure)?)
+                    } else {
+                        panic!("AnimationValue::animate called on a custom and non-custom value");
+                    }
                 }
             }
         })

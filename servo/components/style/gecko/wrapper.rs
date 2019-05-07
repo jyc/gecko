@@ -44,7 +44,6 @@ use crate::gecko_bindings::bindings::{Gecko_ElementState, Gecko_GetDocumentLWThe
 use crate::gecko_bindings::bindings::{Gecko_SetNodeFlags, Gecko_UnsetNodeFlags};
 use crate::gecko_bindings::structs;
 use crate::gecko_bindings::structs::nsChangeHint;
-use crate::gecko_bindings::structs::nsCSSPropertyID;
 use crate::gecko_bindings::structs::Document_DocumentTheme as DocumentTheme;
 use crate::gecko_bindings::structs::EffectCompositor_CascadeLevel as CascadeLevel;
 use crate::gecko_bindings::structs::ELEMENT_HANDLED_SNAPSHOT;
@@ -56,7 +55,6 @@ use crate::gecko_bindings::structs::NODE_NEEDS_FRAME;
 use crate::gecko_bindings::structs::{nsAtom, nsIContent, nsINode_BooleanFlag};
 use crate::gecko_bindings::structs::{
     nsINode as RawGeckoNode, nsXBLBinding as RawGeckoXBLBinding, Element as RawGeckoElement,
-    CSSProperty as RawGeckoCSSProperty,
 };
 use crate::gecko_bindings::sugar::ownership::{HasArcFFI, HasSimpleFFI};
 use crate::global_style_data::GLOBAL_STYLE_DATA;
@@ -2313,30 +2311,6 @@ impl<'a> NamespaceConstraintHelpers for NamespaceConstraint<&'a Namespace> {
         match *self {
             NamespaceConstraint::Any => ptr::null_mut(),
             NamespaceConstraint::Specific(ref ns) => ns.0.as_ptr(),
-        }
-    }
-}
-
-/// TODO
-pub enum GeckoCSSProperty {
-    /// TODO
-    Standard(nsCSSPropertyID),
-    /// TODO
-    Custom(Atom),
-    /// TODO
-    Invalid,
-}
-
-impl GeckoCSSProperty {
-    /// TODO
-    pub fn from_raw(raw: &RawGeckoCSSProperty) -> GeckoCSSProperty {
-        match raw.mState {
-            structs::CSSProperty_State_Standard =>
-                GeckoCSSProperty::Standard(unsafe { *raw.mValue.mStandard.as_ref() }),
-            structs::CSSProperty_State_Custom =>
-                GeckoCSSProperty::Custom(unsafe { Atom::from_raw(*raw.mValue.mCustom.as_ref()) }),
-            structs::CSSProperty_State_Invalid | _ =>
-                GeckoCSSProperty::Invalid,
         }
     }
 }
